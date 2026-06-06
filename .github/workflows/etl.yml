@@ -1,0 +1,49 @@
+name: Fantrax ETL — Weekly Supabase Load
+
+# Runs every Monday at 11:00 UTC (≈ 6 AM CT Standard / 7 AM CT Daylight)
+# Also triggerable manually from the GitHub Actions tab.
+
+on:
+  schedule:
+    - cron: '0 11 * * 1'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Print row counts only — skip all TRUNCATEs and INSERTs'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+jobs:
+  etl:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run ETL
+        env:
+          SUPABASE_PASSWORD: ${{ secrets.SUPABASE_PASSWORD }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+        run: python load_supabase_actions.py 2>&1 | tee etl_log.txt
+
+      - name: Upload ETL log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: etl-log-${{ github.run_id }}
+          path: etl_log.txt
+          retention-days: 30
