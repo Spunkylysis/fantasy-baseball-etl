@@ -74,7 +74,7 @@ jobs:
           DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
         run: python load_supabase_actions.py 2>&1 | tee etl_log.txt
 
-      # ── Upload all logs as one artifact ──────────────────────────────────────
+      # ── Upload logs ──────────────────────────────────────────────────────────
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -85,3 +85,13 @@ jobs:
             convert_log.txt
             etl_log.txt
           retention-days: 30
+
+      # ── Upload debug HTML (login/page snapshots from headless Chrome) ─────────
+      - name: Upload debug HTML
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: etl-debug-html-${{ github.run_id }}
+          path: debug_*.html
+          if-no-files-found: ignore
+          retention-days: 14

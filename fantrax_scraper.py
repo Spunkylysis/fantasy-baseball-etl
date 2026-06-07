@@ -224,13 +224,22 @@ def is_logged_in(driver: webdriver.Chrome) -> bool:
 
 
 def login(driver: webdriver.Chrome) -> None:
-    log("Checking authentication status …")
-    if is_logged_in(driver):
-        log("  ✓  Already logged in — skipping credentials.")
-        return
+    if not HEADLESS:
+        # Local mode: Fantrax session cookies may already be present —
+        # skip the login form if we're already in.
+        log("Checking authentication status …")
+        if is_logged_in(driver):
+            log("  ✓  Already logged in — skipping credentials.")
+            return
 
-    log("Not logged in — navigating to login page …")
+    # Headless / CI: fresh Chrome has no cookies. is_logged_in() false-positives
+    # because Fantrax renders the nav shell even for unauthenticated visitors.
+    # Always do the full login flow in headless mode.
+    log("Navigating to login page …")
     driver.get(LOGIN_URL)
+    # Save the login page immediately so we can inspect it if anything goes wrong
+    _save_debug(driver, "login_page_initial")
+    time.sleep(3)   # let Angular finish the initial render
     wait = WebDriverWait(driver, PAGE_LOAD_WAIT)
 
     # ── Email ──
@@ -250,10 +259,11 @@ def login(driver: webdriver.Chrome) -> None:
             continue
 
     if email_field is None:
-        _save_debug(driver, "login_page")
+        _save_debug(driver, "login_page_no_form")
         raise RuntimeError(
             "Could not find email field on login page. "
-            "Check debug_login_page.html for the page source."
+            "Check debug_login_page_no_form.html — Fantrax may use a modal "
+            "or a different login URL."
         )
 
     email_field.clear()
