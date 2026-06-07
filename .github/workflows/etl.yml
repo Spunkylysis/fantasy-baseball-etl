@@ -3,7 +3,7 @@ name: Fantrax ETL — Weekly Supabase Load
 # Runs every Monday at 11:00 UTC (≈ 6 AM CT Standard / 7 AM CT Daylight)
 # Also triggerable manually from the GitHub Actions tab.
 
-on:
+"on":
   schedule:
     - cron: '0 11 * * 1'
   workflow_dispatch:
