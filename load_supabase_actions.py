@@ -259,6 +259,22 @@ def get_batch_files(table_name: str) -> list[Path]:
 # ── Main ETL ───────────────────────────────────────────────────────────────────
 
 def main() -> int:
+    # ── Diagnostics (remove after first successful run) ────────────────────────
+    log("── Diagnostics ──────────────────────────────────────────────────────────")
+    log(f"  BATCH_DIR: {BATCH_DIR}")
+    log(f"  BATCH_DIR exists: {BATCH_DIR.exists()}")
+    sample = BATCH_DIR / "Fantrax_Players_Hitters_Rawlings_000.sql"
+    if sample.exists():
+        content = sample.read_text(encoding="utf-8")
+        matches = list(re.finditer(r"\bVALUES\s*\(", content, re.IGNORECASE))
+        log(f"  Sample file size: {len(content)} chars")
+        log(f"  First 120 chars:  {repr(content[:120])}")
+        log(f"  VALUES matches:   {len(matches)}")
+    else:
+        log(f"  Sample file NOT FOUND: {sample}")
+        log(f"  Files in BATCH_DIR: {list(BATCH_DIR.iterdir()) if BATCH_DIR.exists() else 'N/A'}")
+    log("")
+
     password = os.environ.get("SUPABASE_PASSWORD", "")
     if not password:
         log("ERROR: SUPABASE_PASSWORD environment variable is not set.")
