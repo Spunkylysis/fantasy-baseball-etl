@@ -1,7 +1,7 @@
-name: Fantrax ETL — Weekly Supabase Load
+name: Fantrax ETL - Weekly Supabase Load
 
-# Runs every Monday at 11:00 UTC (≈ 6 AM CT Standard / 7 AM CT Daylight)
-# Also triggerable manually from the GitHub Actions tab.
+# Runs every Monday at 11:00 UTC (~6 AM CT Standard / ~7 AM CT Daylight)
+# Manually triggerable from the GitHub Actions tab via workflow_dispatch.
 
 "on":
   schedule:
@@ -9,7 +9,7 @@ name: Fantrax ETL — Weekly Supabase Load
   workflow_dispatch:
     inputs:
       dry_run:
-        description: 'Print row counts only — skip all TRUNCATEs and INSERTs'
+        description: 'Print row counts only - skip all TRUNCATEs and INSERTs'
         required: false
         default: 'false'
         type: choice
