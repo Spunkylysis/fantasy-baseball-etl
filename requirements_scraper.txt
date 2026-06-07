@@ -1,0 +1,4 @@
+# Phase 4 — Fantrax Selenium scraper (local only, not used in GitHub Actions)
+selenium>=4.0.0
+webdriver-manager>=4.0.0
+python-dotenv>=1.0.0

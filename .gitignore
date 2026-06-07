@@ -1,0 +1,14 @@
+# Credentials — never commit
+.env
+
+# Selenium debug dumps
+debug_*.html
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE
+.vscode/
+.idea/
