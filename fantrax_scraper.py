@@ -37,7 +37,15 @@ load_dotenv()
 FANTRAX_EMAIL    = os.environ.get("FANTRAX_EMAIL", "")
 FANTRAX_PASSWORD = os.environ.get("FANTRAX_PASSWORD", "")
 
-SOURCES_DIR = Path(r"C:\Users\James\OneDrive\Documents\Claude-Working-Folder\Fantrax\Sources")
+# FANTRAX_HEADLESS=true  → headless Chrome (used in GitHub Actions)
+# FANTRAX_SOURCES_DIR    → override download destination (used in GitHub Actions)
+HEADLESS    = os.environ.get("FANTRAX_HEADLESS", "false").lower() == "true"
+SOURCES_DIR = Path(
+    os.environ.get(
+        "FANTRAX_SOURCES_DIR",
+        r"C:\Users\James\OneDrive\Documents\Claude-Working-Folder\Fantrax\Sources",
+    )
+)
 
 LOGIN_URL      = "https://www.fantrax.com/login"
 LEAGUE_ID      = "cwp6mey5mk1ubete"
@@ -100,23 +108,26 @@ EXPORTS = [
 ]
 
 # ── Selectors tried (in order) to find the Export/Download button ───────────────
-# Fantrax uses Angular Material — the save/download icon is a <mat-icon> inside a <button>.
+# Fantrax uses Angular Material icons. The debug scan of a live Fantrax page
+# confirmed the download button uses the 'get_app' mat-icon text.
 EXPORT_BUTTON_SELECTORS = [
-    # Material icon text content
-    (By.XPATH,      "//mat-icon[normalize-space()='save_alt']//ancestor::button[1]"),
-    (By.XPATH,      "//mat-icon[normalize-space()='file_download']//ancestor::button[1]"),
-    (By.XPATH,      "//mat-icon[normalize-space()='cloud_download']//ancestor::button[1]"),
-    (By.XPATH,      "//mat-icon[normalize-space()='download']//ancestor::button[1]"),
+    # PRIMARY — confirmed via debug scan of live Fantrax page
+    (By.XPATH,        "//mat-icon[normalize-space()='get_app']//ancestor::button[1]"),
+    # Other common Material icon names for download
+    (By.XPATH,        "//mat-icon[normalize-space()='save_alt']//ancestor::button[1]"),
+    (By.XPATH,        "//mat-icon[normalize-space()='file_download']//ancestor::button[1]"),
+    (By.XPATH,        "//mat-icon[normalize-space()='cloud_download']//ancestor::button[1]"),
+    (By.XPATH,        "//mat-icon[normalize-space()='download']//ancestor::button[1]"),
     # aria-label / title
-    (By.XPATH,      "//button[contains(translate(@aria-label,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'export')]"),
-    (By.XPATH,      "//button[contains(translate(@aria-label,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'download')]"),
-    (By.XPATH,      "//button[contains(translate(@title,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'export')]"),
+    (By.XPATH,        "//button[contains(translate(@aria-label,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'export')]"),
+    (By.XPATH,        "//button[contains(translate(@aria-label,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'download')]"),
+    (By.XPATH,        "//button[contains(translate(@title,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'export')]"),
     # Visible button text
-    (By.XPATH,      "//button[contains(translate(normalize-space(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'export')]"),
+    (By.XPATH,        "//button[contains(translate(normalize-space(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'export')]"),
     # CSS class-based
     (By.CSS_SELECTOR, "button.export-btn, button[data-testid='export'], .export-icon button"),
     # Link-based export
-    (By.XPATH,      "//a[contains(translate(normalize-space(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'export')]"),
+    (By.XPATH,        "//a[contains(translate(normalize-space(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'export')]"),
 ]
 
 
@@ -132,17 +143,34 @@ def make_driver() -> webdriver.Chrome:
     SOURCES_DIR.mkdir(parents=True, exist_ok=True)
 
     prefs = {
-        "download.default_directory":   str(SOURCES_DIR),
-        "download.prompt_for_download": False,
-        "download.directory_upgrade":   True,
-        "safebrowsing.enabled":         True,
+        "download.default_directory":        str(SOURCES_DIR),
+        "download.prompt_for_download":      False,
+        "download.directory_upgrade":        True,
+        "safebrowsing.enabled":              True,
+        # Allow downloads in headless mode
+        "profile.default_content_setting_values.automatic_downloads": 1,
     }
     opts = Options()
     opts.add_experimental_option("prefs", prefs)
-    # Keep browser open after script ends so you can inspect failures
-    opts.add_experimental_option("detach", True)
-    opts.add_argument("--start-maximized")
     opts.add_argument("--disable-blink-features=AutomationControlled")
+
+    if HEADLESS:
+        # CI / GitHub Actions mode — no visible window needed
+        opts.add_argument("--headless=new")
+        opts.add_argument("--no-sandbox")
+        opts.add_argument("--disable-dev-shm-usage")
+        opts.add_argument("--disable-gpu")
+        opts.add_argument("--window-size=1920,1080")
+        opts.add_argument(
+            "--user-agent=Mozilla/5.0 (X11; Linux x86_64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        )
+        log("  Running in headless mode.")
+    else:
+        # Local mode — keep browser open so failures are inspectable
+        opts.add_experimental_option("detach", True)
+        opts.add_argument("--start-maximized")
 
     service = Service(ChromeDriverManager().install())
     return webdriver.Chrome(service=service, options=opts)
@@ -177,8 +205,31 @@ def snapshot_csvs() -> set[Path]:
 
 # ── Login ──────────────────────────────────────────────────────────────────────
 
+def is_logged_in(driver: webdriver.Chrome) -> bool:
+    """
+    Return True if the browser already has an active Fantrax session.
+    Navigates to the league home page and checks for the logged-in nav.
+    """
+    try:
+        driver.get(f"{BASE}/home")
+        # The leagues nav item only renders when authenticated
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located(
+                (By.CSS_SELECTOR, "[anchorid='DESKTOP_NAV.leagues']")
+            )
+        )
+        return True
+    except TimeoutException:
+        return False
+
+
 def login(driver: webdriver.Chrome) -> None:
-    log("Navigating to login page …")
+    log("Checking authentication status …")
+    if is_logged_in(driver):
+        log("  ✓  Already logged in — skipping credentials.")
+        return
+
+    log("Not logged in — navigating to login page …")
     driver.get(LOGIN_URL)
     wait = WebDriverWait(driver, PAGE_LOAD_WAIT)
 
@@ -355,7 +406,7 @@ def main() -> int:
     log("=" * 60)
 
     driver = make_driver()
-    results: list[tuple[str, bool]] = []
+    results = []   # list of (name: str, ok: bool)
 
     try:
         login(driver)
@@ -372,7 +423,8 @@ def main() -> int:
         log("  Summary")
         log("=" * 60)
         for name, ok in results:
-            log(f"  {'✓' if ok else '✗'}  {name}")
+            status = "\u2713" if ok else "\u2717"
+            log(f"  {status}  {name}")
 
         failed = [n for n, ok in results if not ok]
         if failed:
@@ -382,7 +434,8 @@ def main() -> int:
         else:
             log(f"\n  All {len(results)} exports complete.")
             log(f"  CSVs in: {SOURCES_DIR}")
-            log("  Browser left open — close it when done.")
+            if not HEADLESS:
+                log("  Browser left open — close it when done.")
 
     return 0 if not failed else 1
 

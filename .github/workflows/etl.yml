@@ -2,6 +2,11 @@ name: Fantrax ETL - Weekly Supabase Load
 
 # Runs every Monday at 11:00 UTC (~6 AM CT Standard / ~7 AM CT Daylight)
 # Manually triggerable from the GitHub Actions tab via workflow_dispatch.
+#
+# Full pipeline (runs in the cloud — desktop does not need to be on):
+#   1. Scrape  — headless Chrome logs into Fantrax, downloads 7 CSVs
+#   2. Convert — csv_to_batches.py turns CSVs into batch SQL INSERT files
+#   3. Load    — load_supabase_actions.py TRUNCATEs and reloads Supabase
 
 "on":
   schedule:
@@ -10,6 +15,14 @@ name: Fantrax ETL - Weekly Supabase Load
     inputs:
       dry_run:
         description: 'Print row counts only - skip all TRUNCATEs and INSERTs'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+      skip_scrape:
+        description: 'Skip Fantrax scrape and use batch files already in repo'
         required: false
         default: 'false'
         type: choice
@@ -32,18 +45,43 @@ jobs:
           cache: 'pip'
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install -r requirements.txt
+          pip install -r requirements_scraper.txt
 
-      - name: Run ETL
+      # ── Step 1: Scrape Fantrax CSVs ──────────────────────────────────────────
+      - name: Scrape Fantrax CSVs (headless Chrome)
+        if: ${{ github.event.inputs.skip_scrape != 'true' }}
+        env:
+          FANTRAX_EMAIL: ${{ secrets.FANTRAX_EMAIL }}
+          FANTRAX_PASSWORD: ${{ secrets.FANTRAX_PASSWORD }}
+          FANTRAX_HEADLESS: 'true'
+          FANTRAX_SOURCES_DIR: ${{ github.workspace }}/csv_downloads
+        run: python fantrax_scraper.py 2>&1 | tee scrape_log.txt
+
+      # ── Step 2: Convert CSVs to batch SQL files ───────────────────────────────
+      - name: Convert CSVs to batch SQL files
+        if: ${{ github.event.inputs.skip_scrape != 'true' }}
+        env:
+          FANTRAX_SOURCES_DIR: ${{ github.workspace }}/csv_downloads
+          FANTRAX_BATCHES_DIR: ${{ github.workspace }}/batches
+        run: python csv_to_batches.py 2>&1 | tee convert_log.txt
+
+      # ── Step 3: Load batch SQL to Supabase ───────────────────────────────────
+      - name: Load batch SQL to Supabase
         env:
           SUPABASE_PASSWORD: ${{ secrets.SUPABASE_PASSWORD }}
           DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
         run: python load_supabase_actions.py 2>&1 | tee etl_log.txt
 
-      - name: Upload ETL log
+      # ── Upload all logs as one artifact ──────────────────────────────────────
+      - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: etl-log-${{ github.run_id }}
-          path: etl_log.txt
+          name: etl-logs-${{ github.run_id }}
+          path: |
+            scrape_log.txt
+            convert_log.txt
+            etl_log.txt
           retention-days: 30
