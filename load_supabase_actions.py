@@ -175,42 +175,18 @@ def _parse_row_values(row_str: str) -> list:
 def parse_batch_file(filepath: Path) -> list[list]:
     """
     Read a batch SQL file and return a list of row value lists.
-    Handles both formats:
-      - One INSERT per line: INSERT INTO t VALUES (...); INSERT INTO t VALUES (...);
-      - Multi-row INSERT:    INSERT INTO t VALUES (...), (...), ...;
-    Uses re.finditer to locate every VALUES ( opening, then walks to the
-    matching closing paren to extract each row's content.
+    Expects one INSERT ... VALUES (...); per line (standard batch format).
+    For each line containing VALUES, extracts the content between the
+    outermost parentheses using a greedy regex on the trimmed line.
     """
-    content = filepath.read_text(encoding="utf-8")
     rows: list[list] = []
-
-    for m in re.finditer(r"\bVALUES\s*\(", content, re.IGNORECASE):
-        start = m.end()          # character after the opening (
-        depth = 1
-        i = start
-        while i < len(content) and depth > 0:
-            ch = content[i]
-            if ch == "'":        # skip quoted strings to avoid false parens
-                i += 1
-                while i < len(content):
-                    if content[i] == "'" and i + 1 < len(content) and content[i + 1] == "'":
-                        i += 2   # escaped quote
-                    elif content[i] == "'":
-                        i += 1
-                        break
-                    else:
-                        i += 1
-            elif ch == "(":
-                depth += 1
-                i += 1
-            elif ch == ")":
-                depth -= 1
-                i += 1
-            else:
-                i += 1
-        row_str = content[start : i - 1]   # content between outer parens
-        rows.append(_parse_row_values(row_str))
-
+    for raw_line in filepath.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        m = re.search(r"VALUES\s*\((.+)\)\s*;?\s*$", line, re.IGNORECASE)
+        if m:
+            rows.append(_parse_row_values(m.group(1)))
     return rows
 
 # ── Date helpers ───────────────────────────────────────────────────────────────
