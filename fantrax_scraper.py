@@ -243,7 +243,10 @@ def login(driver: webdriver.Chrome) -> None:
     wait = WebDriverWait(driver, PAGE_LOAD_WAIT)
 
     # ── Email ──
+    # Fantrax uses Angular Material: the email input has formcontrolname="email"
+    # but NO type="email", name="email", or id="email" — check that first.
     email_selectors = [
+        "input[formcontrolname='email']",   # Angular Material — confirmed selector
         "input[type='email']",
         "input[name='email']",
         "#email",
@@ -251,9 +254,14 @@ def login(driver: webdriver.Chrome) -> None:
         "input[autocomplete='email']",
     ]
     email_field = None
-    for sel in email_selectors:
+    # First selector is the confirmed match — give it the full wait.
+    # Fallback selectors get a short timeout so failures don't pile up.
+    for idx, sel in enumerate(email_selectors):
+        timeout = PAGE_LOAD_WAIT if idx == 0 else 5
         try:
-            email_field = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, sel)))
+            email_field = WebDriverWait(driver, timeout).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, sel))
+            )
             break
         except TimeoutException:
             continue
