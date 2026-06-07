@@ -13,6 +13,7 @@ Usage:
 """
 
 import os
+import re
 import csv
 import sys
 from pathlib import Path
@@ -65,13 +66,12 @@ def sql_val(raw: str) -> str:
     stripped = raw.strip()
     if stripped == "" or stripped.upper() == "NULL":
         return "NULL"
-    # Integer
-    try:
-        int(stripped)
-        return stripped
-    except ValueError:
-        pass
-    # Float (handles '12.5', '-0.5', etc.)
+    # Integer — strip commas first to handle Fantrax salary formatting
+    # e.g. "20,878,000" → 20878000 (bigint), "Smith, J." stays a string
+    no_commas = stripped.replace(",", "")
+    if re.match(r'^-?\d+$', no_commas):
+        return no_commas
+    # Float (handles '12.5', '-0.5', '100%' stripped elsewhere, etc.)
     try:
         float(stripped)
         return stripped
