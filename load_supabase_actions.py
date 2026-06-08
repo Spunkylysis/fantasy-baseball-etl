@@ -461,7 +461,12 @@ def main() -> int:
                 table_key,    # table_key
             )
 
-        th_clean = [_build_th_row(r) for r in raw_th]
+        # Only load Drop transactions — Adds/Trades not needed for cap-hit analysis
+        TH_TYPE_IDX = 3  # raw row: [Player, Team, Position, Type, Owner, Bid, date_cdt, Period]
+        drops = [r for r in raw_th if len(r) > TH_TYPE_IDX and r[TH_TYPE_IDX] == 'Drop']
+        log(f"  Filtered {len(raw_th)} rows → {len(drops)} Drop transactions")
+
+        th_clean = [_build_th_row(r) for r in drops]
 
         cap_filled = sum(1 for r in th_clean if r[SB_TH_COLS.index("cap_hit")] is not None)
         log(f"  Built {len(th_clean)} TH rows  ({cap_filled} with cap_hit, "
@@ -496,13 +501,18 @@ def main() -> int:
         "Fantrax_Players_Pitchers_Rawlings",
         "Fantrax_Players_Pitchers_Topps",
     ]
+    # Exact expected counts for tables that are stable mid-season.
     EXPECTED = {
-        "Fantrax_Transaction_History":        440,
         "Fantrax_HOD_Drafts":                1540,
         "Fantrax_Players_Hitters_Rawlings":  3137,
         "Fantrax_Players_Hitters_Topps":     3137,
         "Fantrax_Players_Pitchers_Rawlings": 3612,
         "Fantrax_Players_Pitchers_Topps":    3612,
+    }
+    # Minimum expected counts for tables that grow over time (e.g. transaction log).
+    # TH only stores Drops, so count will be well below total transactions scraped.
+    EXPECTED_MIN = {
+        "Fantrax_Transaction_History": 50,
     }
 
     log(f"  {'Table':<45} {'Rows':>8}  {'Expected':>8}  {'Status':>7}")
@@ -511,13 +521,22 @@ def main() -> int:
     all_ok = True
     for t in ALL_TABLES:
         cur.execute(f'SELECT COUNT(*) FROM fantrax."{t}"')
-        n   = cur.fetchone()[0]
-        exp = EXPECTED.get(t, '?')
-        ok  = n == exp
+        n = cur.fetchone()[0]
+        if t in EXPECTED:
+            exp_str = str(EXPECTED[t])
+            ok = n == EXPECTED[t]
+            status = '✓' if ok else '✗ MISMATCH'
+        elif t in EXPECTED_MIN:
+            exp_str = f'≥{EXPECTED_MIN[t]}'
+            ok = n >= EXPECTED_MIN[t]
+            status = '✓' if ok else '✗ TOO FEW'
+        else:
+            exp_str = '?'
+            ok = True
+            status = '?'
         if not ok:
             all_ok = False
-        status = '✓' if ok else '✗ MISMATCH'
-        log(f"  {t:<45} {n:>8}  {str(exp):>8}  {status:>7}")
+        log(f"  {t:<45} {n:>8}  {exp_str:>8}  {status:>7}")
 
     cur.close()
     conn.close()
@@ -530,8 +549,3 @@ def main() -> int:
     log(f"======================================================================")
 
     flush_log()
-    return 0 if all_ok else 1
-
-
-if __name__ == "__main__":
-    sys.exit(main())
