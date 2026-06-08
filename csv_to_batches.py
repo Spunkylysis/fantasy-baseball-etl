@@ -102,6 +102,7 @@ def write_batch_files(table_name: str, headers: list[str], rows: list[list[str]]
     for old in BATCHES_DIR.glob(f"{table_name}_*.sql"):
         old.unlink()
 
+    n_cols = len(headers)
     col_list = ", ".join(f'"{h}"' for h in headers)
     insert_prefix = f'INSERT INTO {SCHEMA}."{table_name}" ({col_list}) VALUES'
 
@@ -112,6 +113,9 @@ def write_batch_files(table_name: str, headers: list[str], rows: list[list[str]]
         batch_path = BATCHES_DIR / f"{table_name}_{file_idx:03d}.sql"
         with open(batch_path, "w", encoding="utf-8") as f:
             for row in chunk:
+                # Ensure row length matches headers — pad with empty or truncate
+                if len(row) != n_cols:
+                    row = (list(row) + [''] * n_cols)[:n_cols]
                 vals = ", ".join(sql_val(cell) for cell in row)
                 f.write(f"{insert_prefix} ({vals});\n")
         total += len(chunk)
@@ -162,8 +166,14 @@ def main() -> int:
         headers, rows = read_csv_rows(csv_path)
         if not hod_headers:
             hod_headers = headers
+        n_hdr = len(hod_headers)
+        bad = [(i, len(r)) for i, r in enumerate(rows) if len(r) != n_hdr]
         hod_rows.extend(rows)
-        log(f"   {stem}: {len(rows)} rows")
+        log(f"   {stem}: {len(rows)} rows, {len(headers)} columns")
+        log(f"   Headers: {headers}")
+        if bad:
+            log(f"   ⚠  {len(bad)} rows width mismatch (expected {n_hdr}). "
+                f"First: row {bad[0][0]}, len={bad[0][1]}")
 
     if hod_ok and hod_rows:
         written = write_batch_files("Fantrax_HOD_Drafts", hod_headers, hod_rows)
