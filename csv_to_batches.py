@@ -46,6 +46,21 @@ CSV_TABLE_MAP = {
 # CSVs that share a table (combined in order listed)
 HOD_DRAFTS_CSVS = ["Fantrax_HOD_Drafts_Topps", "Fantrax_HOD_Drafts_Rawlings"]
 
+# Map raw Fantrax CSV column names → Supabase schema column names for HOD_Drafts.
+# "League" is not in the Fantrax export — it is derived from which CSV the row
+# came from (Topps or Rawlings) and injected by the ETL.
+HOD_DRAFTS_COL_MAP = {
+    "Player ID":    "player_id",
+    "Round":        "Round",
+    "Pick":         "Pick",
+    "Ov Pick":      "ov_pick",
+    "Pos":          "Pos",
+    "Player":       "Player",
+    "Team":         "Team",
+    "Fantasy Team": "fantasy_team",
+    "Time (CDT)":   "date_cdt",
+}
+
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -163,14 +178,21 @@ def main() -> int:
             log(f"  ✗  Missing: {csv_path.name}")
             hod_ok = False
             continue
+        # Derive league tag from CSV stem name
+        league_val = "Topps" if "Topps" in stem else "Rawlings"
         headers, rows = read_csv_rows(csv_path)
+        # Rename headers to Supabase schema names; append derived League column
+        mapped_headers = [HOD_DRAFTS_COL_MAP.get(h, h) for h in headers] + ["League"]
         if not hod_headers:
-            hod_headers = headers
+            hod_headers = mapped_headers
         n_hdr = len(hod_headers)
-        bad = [(i, len(r)) for i, r in enumerate(rows) if len(r) != n_hdr]
-        hod_rows.extend(rows)
-        log(f"   {stem}: {len(rows)} rows, {len(headers)} columns")
-        log(f"   Headers: {headers}")
+        # Append league value to every row
+        mapped_rows = [list(row) + [league_val] for row in rows]
+        bad = [(i, len(r)) for i, r in enumerate(mapped_rows) if len(r) != n_hdr]
+        hod_rows.extend(mapped_rows)
+        log(f"   {stem}: {len(rows)} rows, {len(headers)} columns → mapped to {len(mapped_headers)} cols with League='{league_val}'")
+        log(f"   Raw headers  : {headers}")
+        log(f"   Mapped headers: {mapped_headers}")
         if bad:
             log(f"   ⚠  {len(bad)} rows width mismatch (expected {n_hdr}). "
                 f"First: row {bad[0][0]}, len={bad[0][1]}")
@@ -182,7 +204,7 @@ def main() -> int:
     else:
         results.append(("Fantrax_HOD_Drafts", False, 0))
 
-    # ── Summary ────────────────────────────────────────────────────────────────
+    # ── Summary ──────────────────────────────────────────────────────────────────────────
     log("\n" + "=" * 60)
     log("  Summary")
     log("=" * 60)
