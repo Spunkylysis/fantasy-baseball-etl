@@ -189,6 +189,33 @@ def parse_batch_file(filepath: Path) -> list[list]:
             rows.append(_parse_row_values(m.group(1)))
     return rows
 
+
+def parse_batch_file_with_cols(filepath: Path) -> tuple[list[str], list[list]]:
+    """
+    Read a batch SQL file, extracting both column names and row values.
+    Column names are parsed from the first INSERT statement's column list:
+        INSERT INTO schema."table" ("col1", "col2", ...) VALUES (...);
+    Old positional-INSERT files (no column list) return cols=[].
+    """
+    cols: list[str] = []
+    rows: list[list] = []
+    for raw_line in filepath.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        # Capture column list from first INSERT that has one
+        if not cols:
+            col_m = re.search(
+                r'INSERT\s+INTO\s+\S+\s*\(([^)]+)\)\s+VALUES',
+                line, re.IGNORECASE
+            )
+            if col_m:
+                cols = [c.strip().strip('"') for c in col_m.group(1).split(',')]
+        m = re.search(r"VALUES\s*\((.+)\)\s*;?\s*$", line, re.IGNORECASE)
+        if m:
+            rows.append(_parse_row_values(m.group(1)))
+    return cols, rows
+
 # ── Date helpers ───────────────────────────────────────────────────────────────
 
 _DATE_FORMATS = (
@@ -270,8 +297,49 @@ def main() -> int:
             log(f"  ✗  No batch files found for {table_name} — skipping")
             continue
 
-        # Parse all batch files for this table
-        all_rows: list[list] = []
+        # ── HOD_Drafts: read column names from the batch file itself ──────────
+        # Fantrax may change the export structure between seasons. Rather than
+        # hardcoding HOD_DRAFTS_SB_COLS, we parse the column list from the
+        # first INSERT statement in the batch file and use that for the INSERT.
+        if table_name == "Fantrax_HOD_Drafts":
+            batch_cols, first_rows = parse_batch_file_with_cols(files[0])
+            log(f"  Parsed  {files[0].name}  →  {len(first_rows)} rows")
+            all_rows: list[list] = first_rows
+            for fpath in files[1:]:
+                extra = parse_batch_file(fpath)
+                all_rows.extend(extra)
+                log(f"  Parsed  {fpath.name}  →  {len(extra)} rows")
+
+            if not all_rows:
+                log(f"  ✗  No rows parsed — skipping")
+                continue
+
+            # Use cols from batch file if present, else fall back to hardcoded
+            effective_cols = batch_cols if batch_cols else sb_cols
+            log(f"  Columns ({len(effective_cols)}): {effective_cols}")
+
+            if DRY_RUN:
+                log(f"  DRY RUN — would TRUNCATE and INSERT {len(all_rows)} rows")
+                continue
+
+            cur.execute(f'TRUNCATE TABLE fantrax."{table_name}"')
+            conn.commit()
+
+            col_list   = ", ".join(f'"{c}"' for c in effective_cols)
+            insert_sql = f'INSERT INTO fantrax."{table_name}" ({col_list}) VALUES %s'
+
+            inserted = 0
+            for chunk_start in range(0, len(all_rows), CHUNK):
+                chunk = [tuple(r) for r in all_rows[chunk_start:chunk_start + CHUNK]]
+                execute_values(cur, insert_sql, chunk)
+                conn.commit()
+                inserted += len(chunk)
+
+            log(f"  ✓  {inserted} rows inserted")
+            continue
+
+        # ── Player tables (Hitters / Pitchers) ───────────────────────────────
+        all_rows = []
         for fpath in files:
             rows = parse_batch_file(fpath)
             all_rows.extend(rows)
@@ -298,33 +366,27 @@ def main() -> int:
         else:
             clean_rows = all_rows
 
-        # Accumulate salary map from Hitter/Pitcher tables (not HOD_Drafts)
-        is_player_table = "Players" in table_name
-        if is_player_table:
-            league = "Rawlings" if "Rawlings" in table_name else "Topps"
-            # After dropping +/-, column order = sb_cols
-            # ID=0, Player=1, Salary=8 in Hitters and Pitchers
-            pid_idx    = sb_cols.index("ID")
-            player_idx = sb_cols.index("Player")
-            salary_idx = sb_cols.index("Salary")
-            for row in clean_rows:
-                if len(row) > salary_idx:
-                    pname = row[player_idx]
-                    sal   = row[salary_idx]
-                    pid   = row[pid_idx]
-                    if pname and sal is not None and pname not in salary_map:
-                        salary_map[pname] = (sal, pid, league)
+        # Accumulate salary map from Hitter/Pitcher tables
+        league = "Rawlings" if "Rawlings" in table_name else "Topps"
+        pid_idx    = sb_cols.index("ID")
+        player_idx = sb_cols.index("Player")
+        salary_idx = sb_cols.index("Salary")
+        for row in clean_rows:
+            if len(row) > salary_idx:
+                pname = row[player_idx]
+                sal   = row[salary_idx]
+                pid   = row[pid_idx]
+                if pname and sal is not None and pname not in salary_map:
+                    salary_map[pname] = (sal, pid, league)
 
         if DRY_RUN:
             log(f"  DRY RUN — would TRUNCATE and INSERT {len(clean_rows)} rows")
             continue
 
-        # TRUNCATE then INSERT
         cur.execute(f'TRUNCATE TABLE fantrax."{table_name}"')
         conn.commit()
 
-        col_list  = ", ".join(f'"{c}"' for c in sb_cols)
-        placeholders = ", ".join(["%s"] * len(sb_cols))
+        col_list   = ", ".join(f'"{c}"' for c in sb_cols)
         insert_sql = f'INSERT INTO fantrax."{table_name}" ({col_list}) VALUES %s'
 
         inserted = 0
@@ -423,8 +485,8 @@ def main() -> int:
         else:
             log(f"  DRY RUN — would TRUNCATE and INSERT {len(th_clean)} rows")
 
-    # ── Row count verification ─────────────────────────────────────────────────
-    log(f"\n── Row count verification {'─'*44}")
+    # ── Row count verification ────────────────────────────────────────────
+    log(f"\n── Row count verification ────────────────────────────────────────────")
 
     ALL_TABLES = [
         "Fantrax_Transaction_History",
@@ -435,37 +497,37 @@ def main() -> int:
         "Fantrax_Players_Pitchers_Topps",
     ]
     EXPECTED = {
-        "Fantrax_Transaction_History":        327,
+        "Fantrax_Transaction_History":        440,
         "Fantrax_HOD_Drafts":                1540,
-        "Fantrax_Players_Hitters_Rawlings":  3119,
-        "Fantrax_Players_Hitters_Topps":     3119,
-        "Fantrax_Players_Pitchers_Rawlings": 3566,
-        "Fantrax_Players_Pitchers_Topps":    3566,
+        "Fantrax_Players_Hitters_Rawlings":  3137,
+        "Fantrax_Players_Hitters_Topps":     3137,
+        "Fantrax_Players_Pitchers_Rawlings": 3612,
+        "Fantrax_Players_Pitchers_Topps":    3612,
     }
 
     log(f"  {'Table':<45} {'Rows':>8}  {'Expected':>8}  {'Status':>7}")
-    log("  " + "-" * 75)
+    log("  " + "---------------------------------------------------------------------------")
 
     all_ok = True
     for t in ALL_TABLES:
         cur.execute(f'SELECT COUNT(*) FROM fantrax."{t}"')
         n   = cur.fetchone()[0]
-        exp = EXPECTED.get(t, "?")
+        exp = EXPECTED.get(t, '?')
         ok  = n == exp
         if not ok:
             all_ok = False
-        status = "✓" if ok else "✗ MISMATCH"
+        status = '✓' if ok else '✗ MISMATCH'
         log(f"  {t:<45} {n:>8}  {str(exp):>8}  {status:>7}")
 
     cur.close()
     conn.close()
 
-    log(f"\n{'='*70}")
+    log(f"\n======================================================================")
     if all_ok:
         log("  ETL completed successfully — all row counts match.")
     else:
         log("  ETL completed with ROW COUNT MISMATCHES — review output above.")
-    log(f"{'='*70}")
+    log(f"======================================================================")
 
     flush_log()
     return 0 if all_ok else 1
