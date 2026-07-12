@@ -254,13 +254,13 @@ def _excel_serial(dt: datetime.datetime | None) -> str | None:
 # ── Batch file discovery ───────────────────────────────────────────────────────
 
 def get_batch_files(table_name: str) -> list[Path]:
-    """Return sorted list of batch .sql files matching the table name prefix."""
-    files = sorted(BATCH_DIR.glob(f"{table_name}_*.sql"))
-    if not files:
-        # TH uses a fixed filename
-        fixed = BATCH_DIR / f"{table_name}_000.sql"
-        if fixed.exists():
-            return [fixed]
+    """Return sorted list of batch .sql files matching the table name exactly.
+
+    Uses a 3-digit index glob (e.g. Fantrax_Standings_000.sql) so that tables
+    whose names share a prefix — e.g. Fantrax_Standings vs Fantrax_Standings_Hit
+    — do not accidentally pick up each other's files.
+    """
+    files = sorted(BATCH_DIR.glob(f"{table_name}_[0-9][0-9][0-9].sql"))
     return files
 
 # ── Main ETL ───────────────────────────────────────────────────────────────────
@@ -513,10 +513,10 @@ def main() -> int:
     # Exact expected counts for tables that are stable mid-season.
     EXPECTED = {
         "Fantrax_HOD_Drafts":                1540,
-        "Fantrax_Players_Hitters_Rawlings":  3137,
-        "Fantrax_Players_Hitters_Topps":     3137,
-        "Fantrax_Players_Pitchers_Rawlings": 3612,
-        "Fantrax_Players_Pitchers_Topps":    3612,
+        "Fantrax_Players_Hitters_Rawlings":  3275,
+        "Fantrax_Players_Hitters_Topps":     3275,
+        "Fantrax_Players_Pitchers_Rawlings": 3667,
+        "Fantrax_Players_Pitchers_Topps":    3667,
         "Fantrax_Standings":                 28,
         "Fantrax_Standings_Hit":             28,
         "Fantrax_Standings_Pit":             28,
