@@ -62,6 +62,183 @@ HOD_DRAFTS_COL_MAP = {
 }
 
 
+# Fantrax standings multi-section CSV — the one file downloaded for "Fantrax_Standings"
+# contains 25 stacked sub-tables.  We only need the first 5.
+STANDINGS_CSV = "Fantrax_Standings"
+
+# Maps the section header text (first cell of section header row) to an internal key.
+# Only these 5 are parsed; the remaining 20 per-category re-sort sections are dropped.
+STANDINGS_SECTIONS = {
+    "Standings":                       "overall",
+    "Standings - Points - Hitting":    "pts_hit",
+    "Standings - Points - Pitching":   "pts_pit",
+    "Standings - Statistics - Hitting": "stats_hit",
+    "Standings - Statistics - Pitching": "stats_pit",
+}
+
+# Output column headers for the 3 Supabase standings tables.
+STANDINGS_HEADERS = ["Rk", "Team", "League", "FPts", "fp_per_g", "GP", "Hit_pts", "Pit_pts", "PBL_pts"]
+STANDINGS_HIT_HEADERS = [
+    "Team", "League", "Rk", "FPts", "GP",
+    "pts_R",  "pts_1B",  "pts_2B",  "pts_3B",  "pts_HR",
+    "pts_RBI","pts_BB",  "pts_SO",  "pts_SB",  "pts_GIDP",
+    "stat_R", "stat_1B", "stat_2B", "stat_3B", "stat_HR",
+    "stat_RBI","stat_BB","stat_SO", "stat_SB", "stat_GIDP",
+]
+STANDINGS_PIT_HEADERS = [
+    "Team", "League", "Rk", "FPts", "GP",
+    "pts_IP",  "pts_K",   "pts_L",  "pts_ER", "pts_H",
+    "pts_BB",  "pts_SV",  "pts_QS", "pts_CG", "pts_hld_po",
+    "stat_IP", "stat_K",  "stat_L", "stat_ER","stat_H",
+    "stat_BB", "stat_SV", "stat_QS","stat_CG","stat_hld_po",
+]
+
+
+def _derive_league(team_name: str) -> str:
+    """Derive 'Topps' or 'Rawlings' from team name suffix: '(T)' or '(R)'."""
+    t = team_name.strip()
+    if t.endswith("(T)"):
+        return "Topps"
+    if t.endswith("(R)"):
+        return "Rawlings"
+    return ""
+
+
+def parse_standings_sections(csv_path: Path) -> dict:
+    """
+    Parse the multi-section standings CSV into a dict of key → (headers, rows).
+    Only the 5 sections named in STANDINGS_SECTIONS are returned.
+    Section header rows have a single non-empty cell matching a known section name.
+    """
+    with open(csv_path, encoding="utf-8-sig", newline="") as f:
+        reader = csv.reader(f)
+        all_rows = list(reader)
+
+    sections: dict = {}
+    i = 0
+    while i < len(all_rows):
+        row = all_rows[i]
+        if not row:
+            i += 1
+            continue
+        first = row[0].strip()
+        rest_empty = all(c.strip() == "" for c in row[1:])
+        if first in STANDINGS_SECTIONS and rest_empty:
+            key = STANDINGS_SECTIONS[first]
+            i += 1
+            if i >= len(all_rows):
+                break
+            # Next row is column headers — strip trailing empties
+            raw_headers = all_rows[i]
+            headers = [h.strip() for h in raw_headers]
+            while headers and headers[-1] == "":
+                headers.pop()
+            i += 1
+            data_rows: list[list[str]] = []
+            while i < len(all_rows):
+                drow = all_rows[i]
+                # Blank row → end of section
+                if not drow or all(c.strip() == "" for c in drow):
+                    break
+                # Skip the section's own header row if it somehow re-appears
+                if drow[0].strip() in STANDINGS_SECTIONS:
+                    break
+                data_rows.append([c.strip() for c in drow[:len(headers)]])
+                i += 1
+            sections[key] = (headers, data_rows)
+            log(f"   Section '{first}': {len(headers)} cols, {len(data_rows)} rows")
+        else:
+            i += 1
+    return sections
+
+
+def build_standings_batch_rows(sections: dict) -> tuple:
+    """
+    Merge parsed sections into the 3 output datasets.
+    Returns: (standings_rows, hit_rows, pit_rows)
+    Each is a list of lists matching the corresponding HEADERS above.
+
+    Source column layout:
+      overall:   [Rk, Team, FPts, +/-, FP/G, GP, Hit, Pit, PBL]   → indices 0-8
+      pts_hit:   [Rk, Team, FPts, +/-, R, 1B, 2B, 3B, HR, RBI, BB, SO, SB, GIDP]
+      pts_pit:   [Rk, Team, FPts, +/-, IP, K, L, ER, H, BB, SV, QS, CG, HLD+PO]
+      stats_hit: [Rk, Team, FPts, GP,  R, 1B, 2B, 3B, HR, RBI, BB, SO, SB, GIDP]
+      stats_pit: [Rk, Team, FPts, GP,  IP, K, L, ER, H, BB, SV, QS, CG, HLD+PO]
+    Note: stats GP (index 3) is blank in the Fantrax export — stored as empty → NULL.
+    """
+    def _get(row: list, idx: int) -> str:
+        return row[idx] if idx < len(row) else ""
+
+    # ── Fantrax_Standings ──────────────────────────────────────────────────────
+    _, overall_rows = sections.get("overall", ([], []))
+    standings_rows = []
+    for r in overall_rows:
+        team = _get(r, 1)
+        standings_rows.append([
+            _get(r, 0),              # Rk
+            team,                    # Team
+            _derive_league(team),    # League  (derived from (T)/(R) suffix)
+            _get(r, 2),              # FPts
+            _get(r, 4),              # fp_per_g  (FP/G at idx 4; +/- skipped at 3)
+            _get(r, 5),              # GP
+            _get(r, 6),              # Hit_pts
+            _get(r, 7),              # Pit_pts
+            _get(r, 8),              # PBL_pts
+        ])
+
+    # ── Fantrax_Standings_Hit ─────────────────────────────────────────────────
+    _, pts_hit_rows   = sections.get("pts_hit",   ([], []))
+    _, stats_hit_rows = sections.get("stats_hit", ([], []))
+    stats_hit_by_team = {r[1]: r for r in stats_hit_rows if len(r) > 1}
+
+    hit_rows = []
+    for pr in pts_hit_rows:
+        if len(pr) < 2:
+            continue
+        team = _get(pr, 1)
+        sr   = stats_hit_by_team.get(team, [])
+        hit_rows.append([
+            team,                    # Team
+            _derive_league(team),    # League
+            _get(pr, 0),             # Rk
+            _get(pr, 2),             # FPts (from pts section)
+            _get(sr, 3),             # GP   (from stats section; blank → NULL)
+            # points cols (idx 4-13; +/- at 3 skipped)
+            _get(pr, 4),  _get(pr, 5),  _get(pr, 6),  _get(pr, 7),  _get(pr, 8),
+            _get(pr, 9),  _get(pr, 10), _get(pr, 11), _get(pr, 12), _get(pr, 13),
+            # stat cols (idx 4-13; same positional order)
+            _get(sr, 4),  _get(sr, 5),  _get(sr, 6),  _get(sr, 7),  _get(sr, 8),
+            _get(sr, 9),  _get(sr, 10), _get(sr, 11), _get(sr, 12), _get(sr, 13),
+        ])
+
+    # ── Fantrax_Standings_Pit ─────────────────────────────────────────────────
+    _, pts_pit_rows   = sections.get("pts_pit",   ([], []))
+    _, stats_pit_rows = sections.get("stats_pit", ([], []))
+    stats_pit_by_team = {r[1]: r for r in stats_pit_rows if len(r) > 1}
+
+    pit_rows = []
+    for pr in pts_pit_rows:
+        if len(pr) < 2:
+            continue
+        team = _get(pr, 1)
+        sr   = stats_pit_by_team.get(team, [])
+        pit_rows.append([
+            team,                    # Team
+            _derive_league(team),    # League
+            _get(pr, 0),             # Rk
+            _get(pr, 2),             # FPts (from pts section)
+            _get(sr, 3),             # GP   (blank → NULL)
+            # points cols (idx 4-13)
+            _get(pr, 4),  _get(pr, 5),  _get(pr, 6),  _get(pr, 7),  _get(pr, 8),
+            _get(pr, 9),  _get(pr, 10), _get(pr, 11), _get(pr, 12), _get(pr, 13),
+            # stat cols (idx 4-13)
+            _get(sr, 4),  _get(sr, 5),  _get(sr, 6),  _get(sr, 7),  _get(sr, 8),
+            _get(sr, 9),  _get(sr, 10), _get(sr, 11), _get(sr, 12), _get(sr, 13),
+        ])
+
+    return standings_rows, hit_rows, pit_rows
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def log(msg: str) -> None:
@@ -90,6 +267,12 @@ def sql_val(raw: str) -> str:
     try:
         float(stripped)
         return stripped
+    except ValueError:
+        pass
+    # Comma-formatted decimal (e.g. Fantrax standings '3,356.167' → 3356.167)
+    try:
+        float(no_commas)
+        return no_commas
     except ValueError:
         pass
     # String — escape internal single quotes
@@ -203,6 +386,30 @@ def main() -> int:
         results.append(("Fantrax_HOD_Drafts", True, written))
     else:
         results.append(("Fantrax_HOD_Drafts", False, 0))
+
+    # ── Process Standings (multi-section CSV → 3 tables) ──────────────────────
+    log(f"\n── Fantrax_Standings (multi-section → 3 tables) {'─' * 5}")
+    standings_csv = SOURCES_DIR / f"{STANDINGS_CSV}.csv"
+    if not standings_csv.exists():
+        log(f"  ✗  Missing: {standings_csv.name}")
+        results.append(("Fantrax_Standings*", False, 0))
+    else:
+        sections = parse_standings_sections(standings_csv)
+        missing = [k for k in STANDINGS_SECTIONS.values() if k not in sections]
+        if missing:
+            log(f"  ✗  Missing sections in CSV: {missing}")
+            results.append(("Fantrax_Standings*", False, 0))
+        else:
+            s_rows, h_rows, p_rows = build_standings_batch_rows(sections)
+
+            for tbl, hdrs, rows in [
+                ("Fantrax_Standings",     STANDINGS_HEADERS,     s_rows),
+                ("Fantrax_Standings_Hit", STANDINGS_HIT_HEADERS, h_rows),
+                ("Fantrax_Standings_Pit", STANDINGS_PIT_HEADERS, p_rows),
+            ]:
+                written = write_batch_files(tbl, hdrs, rows)
+                log(f"   ✓  {written} rows → {BATCHES_DIR.name}/{tbl}_*.sql")
+                results.append((tbl, True, written))
 
     # ── Summary ──────────────────────────────────────────────────────────────────────────
     log("\n" + "=" * 60)

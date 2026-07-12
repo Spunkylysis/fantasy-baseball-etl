@@ -79,6 +79,10 @@ PLAYER_TABLE_CONFIG = {
     "Fantrax_Players_Pitchers_Rawlings": (PITCHERS_SB_COLS, {13}),
     "Fantrax_Players_Pitchers_Topps":    (PITCHERS_SB_COLS, {13}),
     "Fantrax_HOD_Drafts":                (HOD_DRAFTS_SB_COLS, set()),
+    # Standings: batch files embed column names (same path as HOD_Drafts)
+    "Fantrax_Standings":                 ([], set()),
+    "Fantrax_Standings_Hit":             ([], set()),
+    "Fantrax_Standings_Pit":             ([], set()),
 }
 
 # ── Logging ────────────────────────────────────────────────────────────────────
@@ -297,11 +301,13 @@ def main() -> int:
             log(f"  ✗  No batch files found for {table_name} — skipping")
             continue
 
-        # ── HOD_Drafts: read column names from the batch file itself ──────────
-        # Fantrax may change the export structure between seasons. Rather than
-        # hardcoding HOD_DRAFTS_SB_COLS, we parse the column list from the
-        # first INSERT statement in the batch file and use that for the INSERT.
-        if table_name == "Fantrax_HOD_Drafts":
+        # ── HOD_Drafts + Standings: read column names from the batch file itself ──
+        # These tables' batch files embed the column list in the INSERT statement
+        # (written by csv_to_batches.py), so we parse it dynamically.
+        if table_name in ("Fantrax_HOD_Drafts",
+                          "Fantrax_Standings",
+                          "Fantrax_Standings_Hit",
+                          "Fantrax_Standings_Pit"):
             batch_cols, first_rows = parse_batch_file_with_cols(files[0])
             log(f"  Parsed  {files[0].name}  →  {len(first_rows)} rows")
             all_rows: list[list] = first_rows
@@ -500,6 +506,9 @@ def main() -> int:
         "Fantrax_Players_Hitters_Topps",
         "Fantrax_Players_Pitchers_Rawlings",
         "Fantrax_Players_Pitchers_Topps",
+        "Fantrax_Standings",
+        "Fantrax_Standings_Hit",
+        "Fantrax_Standings_Pit",
     ]
     # Exact expected counts for tables that are stable mid-season.
     EXPECTED = {
@@ -508,6 +517,9 @@ def main() -> int:
         "Fantrax_Players_Hitters_Topps":     3137,
         "Fantrax_Players_Pitchers_Rawlings": 3612,
         "Fantrax_Players_Pitchers_Topps":    3612,
+        "Fantrax_Standings":                 28,
+        "Fantrax_Standings_Hit":             28,
+        "Fantrax_Standings_Pit":             28,
     }
     # Minimum expected counts for tables that grow over time (e.g. transaction log).
     # TH only stores Drops, so count will be well below total transactions scraped.

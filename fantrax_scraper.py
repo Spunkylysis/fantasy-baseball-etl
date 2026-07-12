@@ -105,6 +105,11 @@ EXPORTS = [
         "url":       f"{BASE}/draft-results;divisionId={DIV_RAWLINGS}?view=TEAM",
         "wait_for":  "table, .ag-root, [class*='draft'], [class*='pick']",
     },
+    {
+        "name":      "Fantrax_Standings",
+        "url":       f"{BASE}/standings;view=SEASON_STATS",
+        "wait_for":  "table, .ag-root, [class*='standings'], [class*='leagueStandings']",
+    },
 ]
 
 # ── Selectors tried (in order) to find the Export/Download button ───────────────
