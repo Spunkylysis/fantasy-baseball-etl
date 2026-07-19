@@ -244,6 +244,18 @@ def _parse_date(val) -> datetime.datetime | None:
     return None
 
 
+# Period 1 = 2026-03-25 (inferred from transactions: Period 38 = 2026-05-01, daily cadence).
+# Update SEASON_START each new season.
+SEASON_START = datetime.datetime(2026, 3, 25)
+
+def _period_to_date(period) -> datetime.datetime | None:
+    """Estimate a period's start date from its number (daily cadence)."""
+    try:
+        return SEASON_START + datetime.timedelta(days=int(period) - 1)
+    except (TypeError, ValueError):
+        return None
+
+
 def _excel_serial(dt: datetime.datetime | None) -> str | None:
     """Convert a datetime to an Excel serial date string (days since 1899-12-30)."""
     if dt is None:
@@ -432,8 +444,10 @@ def main() -> int:
 
             player, team, position, type_, owner, bid, date_raw, period = raw[:8]
 
-            # Parse date
+            # Parse date; fall back to period-derived date if Fantrax omitted it
             date_cdt = _parse_date(date_raw)
+            if date_cdt is None:
+                date_cdt = _period_to_date(period)
 
             # Salary / player ID lookup
             info = salary_map.get(player) if player else None
