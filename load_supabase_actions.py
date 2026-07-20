@@ -455,10 +455,11 @@ def main() -> int:
             if date_cdt is None:
                 date_cdt = _period_to_date(period)
 
-            # Derive league from owner name: "(T)" suffix → Topps, else Rawlings.
-            # This ensures we look up the correct league salary for each drop.
-            owner_str   = str(owner).strip() if owner else ""
-            owner_league = "Topps" if owner_str.endswith("(T)") else "Rawlings"
+            # Derive league from owner name: "(T)" anywhere in name → Topps, else Rawlings.
+            # Using "in" rather than endswith() handles names like 'Riddle me This" (T)"'
+            # where Fantrax embeds stray quotes that corrupt the suffix.
+            owner_str    = str(owner).strip() if owner else ""
+            owner_league = "Topps" if "(T)" in owner_str else "Rawlings"
 
             # Salary / player ID / roster-status lookup (league-aware)
             info = salary_map.get((player, owner_league)) if player else None

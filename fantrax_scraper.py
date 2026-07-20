@@ -91,8 +91,13 @@ EXPORTS = [
         "wait_for":  "table, .ag-root, .player-table, [class*='playerTable'], [class*='fantasy-table']",
     },
     {
-        "name":      "Fantrax_Transaction_History",
-        "url":       f"{BASE}/transactions/history",
+        "name":      "Fantrax_Transaction_History_Topps",
+        "url":       f"{BASE}/transactions/history;divisionId={DIV_TOPPS}",
+        "wait_for":  "table, .ag-root, [class*='transactions'], [class*='history']",
+    },
+    {
+        "name":      "Fantrax_Transaction_History_Rawlings",
+        "url":       f"{BASE}/transactions/history;divisionId={DIV_RAWLINGS}",
         "wait_for":  "table, .ag-root, [class*='transactions'], [class*='history']",
     },
     {

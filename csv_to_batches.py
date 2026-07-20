@@ -38,12 +38,14 @@ CSV_TABLE_MAP = {
     "Fantrax_Players_Hitters_Rawlings":  "Fantrax_Players_Hitters_Rawlings",
     "Fantrax_Players_Pitchers_Topps":   "Fantrax_Players_Pitchers_Topps",
     "Fantrax_Players_Pitchers_Rawlings": "Fantrax_Players_Pitchers_Rawlings",
-    "Fantrax_Transaction_History":       "Fantrax_Transaction_History",
-    "Fantrax_HOD_Drafts_Topps":         "Fantrax_HOD_Drafts",
-    "Fantrax_HOD_Drafts_Rawlings":       "Fantrax_HOD_Drafts",
+    "Fantrax_Transaction_History_Topps":    "Fantrax_Transaction_History",
+    "Fantrax_Transaction_History_Rawlings": "Fantrax_Transaction_History",
+    "Fantrax_HOD_Drafts_Topps":            "Fantrax_HOD_Drafts",
+    "Fantrax_HOD_Drafts_Rawlings":          "Fantrax_HOD_Drafts",
 }
 
 # CSVs that share a table (combined in order listed)
+TH_CSVS       = ["Fantrax_Transaction_History_Topps", "Fantrax_Transaction_History_Rawlings"]
 HOD_DRAFTS_CSVS = ["Fantrax_HOD_Drafts_Topps", "Fantrax_HOD_Drafts_Rawlings"]
 
 # Map raw Fantrax CSV column names → Supabase schema column names for HOD_Drafts.
@@ -336,7 +338,7 @@ def main() -> int:
     hod_headers: list[str] = []
 
     # ── Process single-CSV tables ──────────────────────────────────────────────
-    single_csvs = [k for k in CSV_TABLE_MAP if k not in HOD_DRAFTS_CSVS]
+    single_csvs = [k for k in CSV_TABLE_MAP if k not in HOD_DRAFTS_CSVS and k not in TH_CSVS]
     for stem in single_csvs:
         csv_path = SOURCES_DIR / f"{stem}.csv"
         if not csv_path.exists():
@@ -386,6 +388,30 @@ def main() -> int:
         results.append(("Fantrax_HOD_Drafts", True, written))
     else:
         results.append(("Fantrax_HOD_Drafts", False, 0))
+
+    # ── Process Transaction History (merge Topps + Rawlings) ─────────────────
+    log(f"\n── Fantrax_Transaction_History (Topps + Rawlings combined) {'─' * 3}")
+    th_rows: list[list[str]] = []
+    th_headers: list[str] = []
+    th_ok = True
+    for stem in TH_CSVS:
+        csv_path = SOURCES_DIR / f"{stem}.csv"
+        if not csv_path.exists():
+            log(f"  ✗  Missing: {csv_path.name}")
+            th_ok = False
+            continue
+        headers, rows = read_csv_rows(csv_path)
+        if not th_headers:
+            th_headers = headers
+        th_rows.extend(rows)
+        log(f"   {stem}: {len(rows)} rows")
+
+    if th_ok and th_rows:
+        written = write_batch_files("Fantrax_Transaction_History", th_headers, th_rows)
+        log(f"   ✓  {written} combined rows → {BATCHES_DIR.name}/Fantrax_Transaction_History_*.sql")
+        results.append(("Fantrax_Transaction_History", True, written))
+    else:
+        results.append(("Fantrax_Transaction_History", False, 0))
 
     # ── Process Standings (multi-section CSV → 3 tables) ──────────────────────
     log(f"\n── Fantrax_Standings (multi-section → 3 tables) {'─' * 5}")
