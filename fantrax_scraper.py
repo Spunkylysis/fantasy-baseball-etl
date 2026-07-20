@@ -724,31 +724,49 @@ def export_page_capture_api(driver: webdriver.Chrome, export: dict,
 
     ok = export_page(driver, export)
 
-    # Scan performance log for the Fantrax data API call
+    # Scan performance log for the Fantrax data API call.
+    # We want POST https://www.fantrax.com/fxpa/req — the Angular app's data
+    # endpoint.  We must skip Cloudflare cdn-cgi/rum beacons, which also
+    # reference DIV_TOPPS (as part of the page URL they report) and appear
+    # earlier in the log, causing the old "break on first match" logic to
+    # capture the wrong URL.
     entries = _drain_perf_log(driver)
+    best_priority = -1   # higher = better match; 2=fxpa/req, 1=other fantrax XHR
     for entry in entries:
         method = entry.get("method", "")
         params = entry.get("params", {})
 
-        if method == "Network.requestWillBeSent":
-            req = params.get("request", {})
-            url = req.get("url", "")
-            # Look for a Fantrax XHR that contains the Topps division ID in its
-            # URL or POST body — this is the data API call we want to replay.
-            body = req.get("postData", "") or ""
-            if DIV_TOPPS in url or DIV_TOPPS in body:
-                rtype = params.get("type", "")
-                if rtype in ("XHR", "Fetch", "fetch", "xhr"):
-                    log(f"   [API capture] {req.get('method','GET')} {url[:100]}")
-                    topps_api_info["url"]    = url
-                    topps_api_info["method"] = req.get("method", "GET")
-                    topps_api_info["headers"] = req.get("headers", {})
-                    topps_api_info["body"]   = body
-                    # Grab cookies from Selenium session
-                    topps_api_info["cookies"] = driver.get_cookies()
-                    break   # first match is the data call
+        if method != "Network.requestWillBeSent":
+            continue
 
-    if not topps_api_info:
+        req   = params.get("request", {})
+        url   = req.get("url", "")
+        body  = req.get("postData", "") or ""
+        rtype = params.get("type", "")
+
+        if rtype not in ("XHR", "Fetch", "fetch", "xhr"):
+            continue
+
+        # Exclude Cloudflare CDN endpoints (rum, zaraz, etc.)
+        if "cdn-cgi" in url:
+            continue
+
+        if DIV_TOPPS not in url and DIV_TOPPS not in body:
+            continue
+
+        # Score the match: prefer the canonical Fantrax data API endpoint
+        priority = 2 if "fxpa/req" in url else 1
+        if priority > best_priority:
+            best_priority = priority
+            topps_api_info["url"]     = url
+            topps_api_info["method"]  = req.get("method", "GET")
+            topps_api_info["headers"] = req.get("headers", {})
+            topps_api_info["body"]    = body
+            topps_api_info["cookies"] = driver.get_cookies()
+
+    if topps_api_info:
+        log(f"   [API capture] {topps_api_info['method']} {topps_api_info['url'][:100]}")
+    else:
         log("   ⚠  No Fantrax API call captured for Topps TH — "
             "Rawlings replay will be skipped.")
 
