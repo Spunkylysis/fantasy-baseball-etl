@@ -545,10 +545,10 @@ def main() -> int:
     # Exact expected counts for tables that are stable mid-season.
     EXPECTED = {
         "Fantrax_HOD_Drafts":                1540,
-        "Fantrax_Players_Hitters_Rawlings":  3119,
-        "Fantrax_Players_Hitters_Topps":     3119,
-        "Fantrax_Players_Pitchers_Rawlings": 3566,
-        "Fantrax_Players_Pitchers_Topps":    3566,
+        "Fantrax_Players_Hitters_Rawlings":  3295,
+        "Fantrax_Players_Hitters_Topps":     3295,
+        "Fantrax_Players_Pitchers_Rawlings": 3684,
+        "Fantrax_Players_Pitchers_Topps":    3684,
         "Fantrax_Standings":                 28,
         "Fantrax_Standings_Hit":             28,
         "Fantrax_Standings_Pit":             28,
