@@ -300,9 +300,15 @@ def main() -> int:
     )
     cur = conn.cursor()
 
-    # salary_map: player_name → (salary, player_id, league)
+    # salary_map: player_name → (salary, player_id, contract_type)
     # Built while parsing player batch files; used when processing TH.
     salary_map: dict[str, tuple] = {}
+
+    # draft_set: {(player_name, league)} — players who were ORIGINALLY DRAFTED.
+    # Only drafted players are eligible for cap hits when dropped.
+    # FA pickups (not in this set) carry no cap hit obligation regardless of
+    # their current Contract value in the player table.
+    draft_set: set[tuple[str, str]] = set()
 
     # ── Player tables + HOD_Drafts ─────────────────────────────────────────────
     for table_name, (sb_cols, drop_idx) in PLAYER_TABLE_CONFIG.items():
@@ -335,6 +341,16 @@ def main() -> int:
             # Use cols from batch file if present, else fall back to hardcoded
             effective_cols = batch_cols if batch_cols else sb_cols
             log(f"  Columns ({len(effective_cols)}): {effective_cols}")
+
+            # Build draft_set for cap hit eligibility (HOD_Drafts only)
+            if table_name == "Fantrax_HOD_Drafts":
+                p_idx = effective_cols.index("Player") if "Player" in effective_cols else -1
+                l_idx = effective_cols.index("League") if "League" in effective_cols else -1
+                if p_idx >= 0 and l_idx >= 0:
+                    for row in all_rows:
+                        if len(row) > max(p_idx, l_idx):
+                            draft_set.add((str(row[p_idx]), str(row[l_idx])))
+                    log(f"  Draft set: {len(draft_set)} drafted player-league pairs indexed")
 
             if DRY_RUN:
                 log(f"  DRY RUN — would TRUNCATE and INSERT {len(all_rows)} rows")
@@ -468,14 +484,19 @@ def main() -> int:
             salary, pid, roster_status = info if info else (None, None, None)
             league = owner_league
 
-            # Cap hit: "Minor" and "FA" contract players carry 0% penalty.
-            # Only "1st" (standard contract) players incur a -50% cap hit.
-            if roster_status in ("Minor", "FA"):
-                cap_hit_pct = 0.0
-                cap_hit     = 0
-            else:
+            # Cap hit: -50% only if the player was ORIGINALLY DRAFTED (appears in
+            # HOD_Drafts for this league) AND has a "1st" contract.
+            # FA pickups (not in draft_set) carry no cap hit obligation regardless
+            # of their current Contract value — their contract may have changed
+            # after being dropped and re-signed by another team.
+            # "Minor" and "FA" contract players are also always exempt.
+            in_draft = bool(player) and (player, league) in draft_set
+            if in_draft and roster_status == "1st":
                 cap_hit_pct = -0.5
                 cap_hit     = int(round(salary * cap_hit_pct)) if salary else None
+            else:
+                cap_hit_pct = 0.0
+                cap_hit     = 0
             key         = f"{pid}{league}" if pid and league else None
             date_number = _excel_serial(date_cdt)
             table_key   = f"{key}{date_number}" if key and date_number else None
