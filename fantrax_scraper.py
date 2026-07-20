@@ -12,6 +12,7 @@ Requirements:
     pip install -r requirements_scraper.txt
 """
 
+import csv as csv_mod
 import os
 import sys
 import time
@@ -96,11 +97,12 @@ EXPORTS = [
         "wait_for":  "table, .ag-root, [class*='transactions'], [class*='history']",
     },
     {
-        # Rawlings uses the same URL format as Topps — just a different division ID.
-        # The commissioner/claim-drop page has no export button; this TH page does.
-        "name":      "Fantrax_Transaction_History_Rawlings",
-        "url":       f"{BASE}/transactions/history;team=DIV_{DIV_RAWLINGS}",
-        "wait_for":  "table, .ag-root, [class*='transactions'], [class*='history']",
+        # Rawlings TH: regular TH page is division-scoped to the scraper's Topps
+        # account and returns nothing for Rawlings. The commissioner/claim-drop page
+        # has Rawlings data but no export button — scrape the ag-grid rows directly.
+        "name":        "Fantrax_Transaction_History_Rawlings",
+        "url":         f"{BASE}/commissioner/claim-drop;divId={DIV_RAWLINGS}",
+        "scrape_type": "commissioner_html",
     },
     {
         "name":      "Fantrax_HOD_Drafts_Topps",
@@ -414,6 +416,160 @@ def export_page(driver: webdriver.Chrome, export: dict) -> bool:
     return True
 
 
+# ── Commissioner claim-drop HTML extractor ─────────────────────────────────────
+# The commissioner/claim-drop page has no export button.  We extract ag-grid rows
+# directly via JavaScript and write a CSV matching the standard TH export format.
+
+# Maps commissioner page ag-grid header text → standard TH CSV column name.
+# Logged on every run so the mapping can be verified and corrected if Fantrax
+# changes column names.
+COMMISSIONER_COL_MAP = {
+    "Player":        "Player",
+    "MLB Team":      "Team",
+    "Team":          "Team",
+    "Pos":           "Position",
+    "Position":      "Position",
+    "Type":          "Type",
+    "Fantasy Team":  "Owner",
+    "Owner":         "Owner",
+    "Bid":           "Bid",
+    "FAAB Bid":      "Bid",
+    "FAAB":          "Bid",
+    "Time (CDT)":    "Time (CDT)",
+    "Date":          "Time (CDT)",
+    "Time":          "Time (CDT)",
+    "Period":        "Period",
+    "Wk":            "Period",
+    "Week":          "Period",
+}
+
+# Output column order — must match the Topps TH export so csv_to_batches.py
+# can merge both files into a single Fantrax_Transaction_History table.
+TH_CSV_HEADERS = ["Player", "Team", "Position", "Type", "Owner", "Bid",
+                   "Time (CDT)", "Period"]
+
+
+def scrape_commissioner_claim_drop(driver: webdriver.Chrome, export: dict) -> bool:
+    """
+    Scrape Fantrax commissioner/claim-drop by extracting ag-grid rows via
+    JavaScript.  Saves a CSV matching the standard TH export column layout.
+    """
+    name = export["name"]
+    url  = export["url"]
+
+    log(f"\n── {name} {'─' * max(1, 54 - len(name))}")
+    log(f"   → {url}  [commissioner ag-grid extraction]")
+
+    driver.get(url)
+
+    # Wait for at least one ag-grid row to appear
+    log("   Waiting for ag-grid rows …")
+    try:
+        WebDriverWait(driver, PAGE_LOAD_WAIT).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, ".ag-row"))
+        )
+        time.sleep(5)   # allow Angular to finish rendering all rows
+    except TimeoutException:
+        _save_debug(driver, name)
+        log(f"   ✗  No ag-grid rows found after {PAGE_LOAD_WAIT}s. "
+            f"Debug saved → debug_{name}.html")
+        return False
+
+    # Scroll to bottom then back to top to materialise virtualised rows
+    try:
+        driver.execute_script(
+            "const vp = document.querySelector('.ag-body-viewport');"
+            "if (vp) vp.scrollTop = vp.scrollHeight;"
+        )
+        time.sleep(2)
+        driver.execute_script(
+            "const vp = document.querySelector('.ag-body-viewport');"
+            "if (vp) vp.scrollTop = 0;"
+        )
+        time.sleep(1)
+    except Exception:
+        pass
+
+    # Extract column headers from the rendered ag-grid header row
+    raw_headers: list = driver.execute_script("""
+        return Array.from(
+            document.querySelectorAll('.ag-header-cell .ag-header-cell-text')
+        ).map(el => el.textContent.trim()).filter(h => h.length > 0);
+    """) or []
+    log(f"   Headers found on page: {raw_headers}")
+
+    # Try ag-grid internal API first — returns ALL rows including virtualised ones
+    raw_rows = driver.execute_script("""
+        const root = document.querySelector('.ag-root-wrapper');
+        if (!root) return null;
+        for (const key of Object.keys(root)) {
+            try {
+                const comp = root[key];
+                const api  = comp && (comp.gridOptions?.api || comp.api || comp.gridApi);
+                if (api && typeof api.forEachNode === 'function') {
+                    const rows = [];
+                    api.forEachNode(node => { if (node.data) rows.push(Object.values(node.data)); });
+                    return rows;
+                }
+            } catch (e) {}
+        }
+        return null;
+    """)
+
+    if not raw_rows:
+        # Fallback: extract from visible DOM cells, sorted by left-offset
+        log("   ag-grid API inaccessible — falling back to DOM cell extraction")
+        raw_rows = driver.execute_script("""
+            const rows = [];
+            document.querySelectorAll('.ag-row').forEach(rowEl => {
+                const cells = Array.from(rowEl.querySelectorAll('.ag-cell'));
+                cells.sort((a, b) =>
+                    parseInt(a.style.left || 0) - parseInt(b.style.left || 0)
+                );
+                rows.push(cells.map(c => c.textContent.trim()));
+            });
+            return rows;
+        """) or []
+
+    if not raw_rows:
+        _save_debug(driver, name)
+        log(f"   ✗  Extracted 0 rows. Debug saved → debug_{name}.html")
+        return False
+
+    log(f"   Extracted {len(raw_rows)} rows")
+
+    # Build header → index map using COMMISSIONER_COL_MAP
+    col_index: dict[str, int] = {}
+    for i, h in enumerate(raw_headers):
+        mapped = COMMISSIONER_COL_MAP.get(h)
+        if mapped and mapped not in col_index:
+            col_index[mapped] = i
+    log(f"   Column mapping applied: {col_index}")
+    missing = [c for c in TH_CSV_HEADERS if c not in col_index]
+    if missing:
+        log(f"   ⚠  Columns not found on page (will be blank): {missing}")
+
+    # Build output rows in standard TH column order
+    out_rows = []
+    for raw in raw_rows:
+        out_row = [
+            (raw[col_index[col]] if col in col_index and col_index[col] < len(raw) else "")
+            for col in TH_CSV_HEADERS
+        ]
+        out_rows.append(out_row)
+
+    # Write CSV
+    dest = SOURCES_DIR / f"{name}.csv"
+    with open(dest, "w", newline="", encoding="utf-8") as f:
+        writer = csv_mod.writer(f)
+        writer.writerow(TH_CSV_HEADERS)
+        writer.writerows(out_rows)
+
+    size_kb = dest.stat().st_size // 1024
+    log(f"   ✓  Saved → {dest.name}  ({size_kb} KB, {len(out_rows)} rows)")
+    return True
+
+
 # ── Debug helper ───────────────────────────────────────────────────────────────
 
 def _save_debug(driver: webdriver.Chrome, label: str) -> None:
@@ -442,7 +598,10 @@ def main() -> int:
         login(driver)
 
         for export in EXPORTS:
-            ok = export_page(driver, export)
+            if export.get("scrape_type") == "commissioner_html":
+                ok = scrape_commissioner_claim_drop(driver, export)
+            else:
+                ok = export_page(driver, export)
             results.append((export["name"], ok))
 
     except RuntimeError as e:
