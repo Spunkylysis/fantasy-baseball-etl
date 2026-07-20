@@ -92,12 +92,12 @@ EXPORTS = [
     },
     {
         "name":      "Fantrax_Transaction_History_Topps",
-        "url":       f"{BASE}/transactions/history;divId={DIV_TOPPS}",
+        "url":       f"{BASE}/transactions/history;team=DIV_{DIV_TOPPS}",
         "wait_for":  "table, .ag-root, [class*='transactions'], [class*='history']",
     },
     {
         "name":      "Fantrax_Transaction_History_Rawlings",
-        "url":       f"{BASE}/transactions/history;divId={DIV_RAWLINGS}",
+        "url":       f"{BASE}/transactions/history;team=DIV_{DIV_RAWLINGS}",
         "wait_for":  "table, .ag-root, [class*='transactions'], [class*='history']",
     },
     {
