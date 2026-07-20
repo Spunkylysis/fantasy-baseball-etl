@@ -388,20 +388,20 @@ def main() -> int:
         # Keyed by (player_name, league) so Topps and Rawlings salaries are
         # stored independently — a player's salary can differ across leagues.
         league = "Rawlings" if "Rawlings" in table_name else "Topps"
-        pid_idx    = sb_cols.index("ID")
-        player_idx = sb_cols.index("Player")
-        salary_idx = sb_cols.index("Salary")
-        status_idx = sb_cols.index("Status")
+        pid_idx      = sb_cols.index("ID")
+        player_idx   = sb_cols.index("Player")
+        salary_idx   = sb_cols.index("Salary")
+        contract_idx = sb_cols.index("Contract")
         for row in clean_rows:
             if len(row) > salary_idx:
-                pname  = row[player_idx]
-                sal    = row[salary_idx]
-                pid    = row[pid_idx]
-                status = row[status_idx] if len(row) > status_idx else None
+                pname    = row[player_idx]
+                sal      = row[salary_idx]
+                pid      = row[pid_idx]
+                contract = row[contract_idx] if len(row) > contract_idx else None
                 if pname and sal is not None:
                     # Always overwrite so the most-recently-loaded file wins
                     # (both leagues are loaded once per ETL run)
-                    salary_map[(pname, league)] = (sal, pid, status)
+                    salary_map[(pname, league)] = (sal, pid, contract)
 
         if DRY_RUN:
             log(f"  DRY RUN — would TRUNCATE and INSERT {len(clean_rows)} rows")
@@ -468,9 +468,9 @@ def main() -> int:
             salary, pid, roster_status = info if info else (None, None, None)
             league = owner_league
 
-            # Cap hit: Minor-league-rostered players carry 0% penalty (they are
-            # development slots, not active roster commitments).  All others: -50%.
-            if roster_status == "Minor":
+            # Cap hit: "Minor" and "FA" contract players carry 0% penalty.
+            # Only "1st" (standard contract) players incur a -50% cap hit.
+            if roster_status in ("Minor", "FA"):
                 cap_hit_pct = 0.0
                 cap_hit     = 0
             else:
