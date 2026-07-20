@@ -500,7 +500,7 @@ def _parse_fantrax_th_json(data, log_fn) -> tuple | None:
                    f"{pagination.get('totalNumPages')}, "
                    f"{pagination.get('totalNumResults')} total results")
             for key in ("rows", "transactions", "transactionList", "items",
-                        "claims", "history", "results"):
+                        "claims", "history", "results", "table", "displayedLists"):
                 val = rd.get(key)
                 if isinstance(val, list):
                     tx_list = val
@@ -509,6 +509,19 @@ def _parse_fantrax_th_json(data, log_fn) -> tuple | None:
                         log_fn(f"   Row[0] keys : {list(tx_list[0].keys())[:20]}")
                         log_fn(f"   Row[0] value: {json.dumps(tx_list[0])[:500]}")
                     break
+                elif isinstance(val, dict):
+                    # table may be {"rows": [...], "headers": [...]}
+                    for sub_key in ("rows", "items", "transactions"):
+                        sub_val = val.get(sub_key)
+                        if isinstance(sub_val, list):
+                            tx_list = sub_val
+                            log_fn(f"   Row list key='{key}.{sub_key}', {len(tx_list)} rows on this page")
+                            if tx_list:
+                                log_fn(f"   Row[0] keys : {list(tx_list[0].keys())[:20]}")
+                                log_fn(f"   Row[0] value: {json.dumps(tx_list[0])[:500]}")
+                            break
+                    if tx_list is not None:
+                        break
             if tx_list is None:
                 # Row key not found — dump the full data object to help debugging
                 log_fn(f"   ✗  No row key found in responses[{i}].data")
