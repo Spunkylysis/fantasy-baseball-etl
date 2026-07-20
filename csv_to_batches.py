@@ -38,15 +38,14 @@ CSV_TABLE_MAP = {
     "Fantrax_Players_Hitters_Rawlings":  "Fantrax_Players_Hitters_Rawlings",
     "Fantrax_Players_Pitchers_Topps":   "Fantrax_Players_Pitchers_Topps",
     "Fantrax_Players_Pitchers_Rawlings": "Fantrax_Players_Pitchers_Rawlings",
-    # Single combined TH CSV (team=ALL) replaces separate Topps/Rawlings scrapes.
-    # League is derived from Owner name suffix in load_supabase_actions.py.
-    "Fantrax_Transaction_History":       "Fantrax_Transaction_History",
+    "Fantrax_Transaction_History_Topps":    "Fantrax_Transaction_History",
+    "Fantrax_Transaction_History_Rawlings": "Fantrax_Transaction_History",
     "Fantrax_HOD_Drafts_Topps":            "Fantrax_HOD_Drafts",
     "Fantrax_HOD_Drafts_Rawlings":          "Fantrax_HOD_Drafts",
 }
 
 # CSVs that share a table (combined in order listed)
-TH_CSVS       = ["Fantrax_Transaction_History"]
+TH_CSVS       = ["Fantrax_Transaction_History_Topps", "Fantrax_Transaction_History_Rawlings"]
 HOD_DRAFTS_CSVS = ["Fantrax_HOD_Drafts_Topps", "Fantrax_HOD_Drafts_Rawlings"]
 
 # Map raw Fantrax CSV column names → Supabase schema column names for HOD_Drafts.
@@ -390,8 +389,8 @@ def main() -> int:
     else:
         results.append(("Fantrax_HOD_Drafts", False, 0))
 
-    # ── Process Transaction History (all leagues — single combined CSV) ──────
-    log(f"\n── Fantrax_Transaction_History (all leagues) {'─' * 16}")
+    # ── Process Transaction History (merge Topps + Rawlings) ─────────────────
+    log(f"\n── Fantrax_Transaction_History (Topps + Rawlings combined) {'─' * 3}")
     th_rows: list[list[str]] = []
     th_headers: list[str] = []
     th_ok = True

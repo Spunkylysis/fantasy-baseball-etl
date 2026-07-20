@@ -91,11 +91,15 @@ EXPORTS = [
         "wait_for":  "table, .ag-root, .player-table, [class*='playerTable'], [class*='fantasy-table']",
     },
     {
-        # team=ALL returns every transaction across both Topps and Rawlings divisions.
-        # League is derived in load_supabase_actions.py from the Owner name suffix
-        # ("(T)" → Topps, else Rawlings), so a single combined CSV is correct here.
-        "name":      "Fantrax_Transaction_History",
-        "url":       f"{BASE}/transactions/history;team=ALL",
+        "name":      "Fantrax_Transaction_History_Topps",
+        "url":       f"{BASE}/transactions/history;team=DIV_{DIV_TOPPS}",
+        "wait_for":  "table, .ag-root, [class*='transactions'], [class*='history']",
+    },
+    {
+        # Rawlings uses the same URL format as Topps — just a different division ID.
+        # The commissioner/claim-drop page has no export button; this TH page does.
+        "name":      "Fantrax_Transaction_History_Rawlings",
+        "url":       f"{BASE}/transactions/history;team=DIV_{DIV_RAWLINGS}",
         "wait_for":  "table, .ag-root, [class*='transactions'], [class*='history']",
     },
     {
