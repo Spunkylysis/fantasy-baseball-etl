@@ -458,15 +458,22 @@ def _drain_perf_log(driver: webdriver.Chrome) -> list[dict]:
         return []
 
 
-def _parse_fantrax_th_json(data, log_fn) -> list | None:
+def _parse_fantrax_th_json(data, log_fn) -> tuple | None:
     """
-    Convert Fantrax /fxpa/req JSON response into TH CSV rows.
+    Convert one page of Fantrax /fxpa/req JSON into TH CSV rows.
 
-    Returns list of 8-element rows matching TH_CSV_HEADERS, or None if the
-    JSON structure is unrecognizable.
+    Returns (rows, pagination) where:
+        rows       – list of 8-element lists matching TH_CSV_HEADERS
+        pagination – dict from paginatedResultSet (totalNumPages, pageNumber, …)
+    Returns None if the response structure is not recognised.
 
-    Logs diagnostic info so structure can be inspected from the ETL log if
-    parsing fails or field mapping is wrong.
+    The /fxpa/req endpoint returns a multi-method response:
+        {"data": {}, "roles": {}, "responses": [
+            {"data": {"paginatedResultSet": {…}, "rows": […]}},  ← getTransactionDetailsHistory
+            {"data": {…}},  ← getFantasyLeagueInfo
+            {"data": {…}},  ← getFantasyTeams
+        ]}
+    We navigate directly to the response with paginatedResultSet.
     """
     # ── Log top-level structure ───────────────────────────────────────────────
     if isinstance(data, dict):
@@ -474,48 +481,45 @@ def _parse_fantrax_th_json(data, log_fn) -> list | None:
     elif isinstance(data, list):
         log_fn(f"   JSON is list[{len(data)}]")
 
-    # ── Locate the transaction array ──────────────────────────────────────────
-    TX_KEYS = {"transactionType", "type", "action", "player", "playerName",
-               "addPlayerInfo", "dropPlayerInfo", "fantasyTeam"}
+    # ── Navigate to the paginated response data ───────────────────────────────
+    tx_list = None
+    pagination: dict = {}
 
-    def _find_tx(obj, depth=0):
-        if depth > 6:
-            return None
-        if isinstance(obj, list):
-            if len(obj) > 0 and isinstance(obj[0], dict):
-                first = obj[0]
-                # Confident match: has known transaction field names
-                if TX_KEYS & set(first.keys()):
-                    return obj
-                # Probable match: large list of dicts
-                if len(obj) > 2:
-                    return obj
-            # Not a tx list — recurse into elements to find one
-            candidates = [c for v in obj for c in [_find_tx(v, depth + 1)] if c]
-            if candidates:
-                return max(candidates, key=len)
-            return None
-        if isinstance(obj, dict):
-            # Try well-known key names first
-            for key in ("transactions", "transactionList", "items", "rows",
-                        "history", "claims", "drops", "adds"):
-                if key in obj and isinstance(obj[key], list) and len(obj[key]) > 0:
-                    return obj[key]
-            # Recurse into all values, pick the largest result
-            candidates = [c for v in obj.values() for c in [_find_tx(v, depth + 1)] if c]
-            if candidates:
-                return max(candidates, key=len)
+    responses = data.get("responses") if isinstance(data, dict) else None
+    if isinstance(responses, list):
+        for i, resp in enumerate(responses):
+            if not isinstance(resp, dict):
+                continue
+            rd = resp.get("data")
+            if not isinstance(rd, dict) or "paginatedResultSet" not in rd:
+                continue
+            # This is the transaction history response
+            pagination = rd.get("paginatedResultSet", {})
+            log_fn(f"   responses[{i}].data keys: {list(rd.keys())}")
+            log_fn(f"   Pagination: page {pagination.get('pageNumber')} of "
+                   f"{pagination.get('totalNumPages')}, "
+                   f"{pagination.get('totalNumResults')} total results")
+            for key in ("rows", "transactions", "transactionList", "items",
+                        "claims", "history", "results"):
+                val = rd.get(key)
+                if isinstance(val, list):
+                    tx_list = val
+                    log_fn(f"   Row list key='{key}', {len(tx_list)} rows on this page")
+                    if tx_list:
+                        log_fn(f"   Row[0] keys : {list(tx_list[0].keys())[:20]}")
+                        log_fn(f"   Row[0] value: {json.dumps(tx_list[0])[:500]}")
+                    break
+            if tx_list is None:
+                # Row key not found — dump the full data object to help debugging
+                log_fn(f"   ✗  No row key found in responses[{i}].data")
+                log_fn(f"   responses[{i}].data (first 800): {json.dumps(rd)[:800]}")
+                return None
+            break  # found the paginated response; stop looking
+
+    if tx_list is None:
+        log_fn("   ✗  No 'responses' list with paginatedResultSet found")
+        log_fn(f"   JSON (first 800): {json.dumps(data)[:800]}")
         return None
-
-    tx_list = _find_tx(data)
-    if not tx_list:
-        log_fn("   ✗  No transaction list located in JSON")
-        log_fn(f"   JSON (first 1000 chars): {json.dumps(data)[:1000]}")
-        return None
-
-    log_fn(f"   Found {len(tx_list)} transaction object(s)")
-    log_fn(f"   Sample keys : {list(tx_list[0].keys())[:20]}")
-    log_fn(f"   Sample value: {json.dumps(tx_list[0])[:400]}")
 
     # ── Field extraction helpers ──────────────────────────────────────────────
 
@@ -612,7 +616,7 @@ def _parse_fantrax_th_json(data, log_fn) -> list | None:
         rows.append([player, team, pos, tx_type, owner, bid, date_str,
                      str(period) if period else ""])
 
-    return rows
+    return rows, pagination
 
 
 def scrape_th_via_api(driver: webdriver.Chrome, export: dict,
@@ -691,19 +695,59 @@ def scrape_th_via_api(driver: webdriver.Chrome, export: dict,
             log(f"   Raw response saved → {debug.name} for inspection")
             return False
 
-        rows = _parse_fantrax_th_json(data, log)
-        if rows is None:
+        result = _parse_fantrax_th_json(data, log)
+        if result is None:
             log("   ✗  JSON structure not recognized — saving raw JSON for inspection")
             debug = SOURCES_DIR / f"{name}_debug.json"
             debug.write_text(resp.text, encoding="utf-8")
             log(f"   Raw JSON saved → {debug.name}")
             return False
 
+        all_rows, pagination = result
+        total_pages = pagination.get("totalNumPages", 1)
+
+        # ── Paginate through remaining pages ──────────────────────────────────
+        if total_pages > 1:
+            log(f"   Fetching pages 2–{total_pages} ({pagination.get('totalNumResults')} total results) …")
+            for page_num in range(2, total_pages + 1):
+                # Inject pageNumber into the POST body
+                try:
+                    body_json = json.loads(body)
+                    for msg in body_json.get("msgs", []):
+                        if "data" in msg and isinstance(msg["data"], dict):
+                            msg["data"]["pageNumber"] = page_num
+                    page_body = json.dumps(body_json)
+                except Exception:
+                    page_body = body   # fall back to unmodified body
+
+                try:
+                    page_resp = (sess.post(api_url, data=page_body,
+                                           headers=headers, timeout=30)
+                                 if method == "POST"
+                                 else sess.get(api_url, headers=headers, timeout=30))
+                except Exception as e:
+                    log(f"   ⚠  Page {page_num} request failed: {e}")
+                    break
+
+                if page_resp.status_code != 200:
+                    log(f"   ⚠  Page {page_num} HTTP {page_resp.status_code} — stopping")
+                    break
+
+                page_result = _parse_fantrax_th_json(
+                    page_resp.json(), lambda m: None)   # silent
+                if page_result is None:
+                    log(f"   ⚠  Page {page_num} parse failed — stopping")
+                    break
+                page_rows, _ = page_result
+                all_rows.extend(page_rows)
+                log(f"   Page {page_num}/{total_pages}: +{len(page_rows)} rows "
+                    f"(total so far: {len(all_rows)})")
+
         with open(dest, "w", newline="", encoding="utf-8") as f:
             writer = csv_mod.writer(f)
             writer.writerow(TH_CSV_HEADERS)
-            writer.writerows(rows)
-        log(f"   ✓  Parsed {len(rows)} rows → {dest.name}")
+            writer.writerows(all_rows)
+        log(f"   ✓  Parsed {len(all_rows)} rows → {dest.name}")
     else:
         # Already CSV (same format as Topps TH export) — save directly
         dest.write_bytes(resp.content)
