@@ -524,8 +524,14 @@ def _parse_fantrax_th_json(data, log_fn) -> tuple | None:
                             tx_list = sub_val
                             log_fn(f"   Row list key='{key}.{sub_key}', {len(tx_list)} rows on this page")
                             if tx_list:
-                                log_fn(f"   Row[0] keys : {list(tx_list[0].keys())[:20]}")
-                                log_fn(f"   Row[0] value: {json.dumps(tx_list[0])[:500]}")
+                                r0 = tx_list[0]
+                                log_fn(f"   Row[0] keys : {list(r0.keys())[:20]}")
+                                log_fn(f"   Row[0] full : {json.dumps(r0)[:2000]}")
+                                log_fn(f"   Row[0] transactionType = {r0.get('transactionType')!r}")
+                                log_fn(f"   Row[0] feesUsed        = {r0.get('feesUsed')!r}")
+                                log_fn(f"   Row[0] executed        = {r0.get('executed')!r}")
+                                cells = r0.get("cells", [])
+                                log_fn(f"   Row[0] cells[:5]       = {json.dumps(cells[:5])[:600]}")
                             break
                     if tx_list is not None:
                         break
@@ -644,7 +650,9 @@ def _parse_fantrax_th_json(data, log_fn) -> tuple | None:
             tx.get("transactionType") or tx.get("type") or tx.get("action")
         )
         owner   = _get_owner(tx)
-        bid_val = (tx.get("feesUsed") if tx.get("feesUsed") is not None
+        # feesUsed is False (bool) for drops, numeric for claims — skip booleans
+        _fees = tx.get("feesUsed")
+        bid_val = (_fees if (_fees is not None and not isinstance(_fees, bool))
                    else tx.get("faabBid") if tx.get("faabBid") is not None
                    else tx.get("bid") if tx.get("bid") is not None
                    else tx.get("amount") if tx.get("amount") is not None

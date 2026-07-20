@@ -448,6 +448,9 @@ def main() -> int:
                 raw.append(None)
 
             player, team, position, type_, owner, bid, date_raw, period = raw[:8]
+            # Guard against boolean strings written to CSV (e.g. "False" from feesUsed)
+            if str(bid).strip().lower() in ("false", "true", "none", "null", ""):
+                bid = None
 
             # Parse date; fall back to period-derived date if Fantrax omitted it
             date_cdt = _parse_date(date_raw)
