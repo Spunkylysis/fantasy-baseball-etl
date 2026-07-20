@@ -21,6 +21,7 @@ import time
 import shutil
 from pathlib import Path
 from datetime import datetime
+import datetime as dt_mod
 
 from dotenv import load_dotenv
 from selenium import webdriver
@@ -148,6 +149,11 @@ EXPORT_BUTTON_SELECTORS = [
     # Link-based export
     (By.XPATH,        "//a[contains(translate(normalize-space(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'export')]"),
 ]
+
+
+# CSV column headers that csv_to_batches.py / load_supabase_actions.py expect
+# for Transaction History data.  Rawlings JSON must be converted to this layout.
+TH_CSV_HEADERS = ["Player", "Team", "Position", "Type", "Owner", "Bid", "Time (CDT)", "Period"]
 
 
 # ── Utilities ──────────────────────────────────────────────────────────────────
@@ -452,6 +458,163 @@ def _drain_perf_log(driver: webdriver.Chrome) -> list[dict]:
         return []
 
 
+def _parse_fantrax_th_json(data, log_fn) -> list | None:
+    """
+    Convert Fantrax /fxpa/req JSON response into TH CSV rows.
+
+    Returns list of 8-element rows matching TH_CSV_HEADERS, or None if the
+    JSON structure is unrecognizable.
+
+    Logs diagnostic info so structure can be inspected from the ETL log if
+    parsing fails or field mapping is wrong.
+    """
+    # ── Log top-level structure ───────────────────────────────────────────────
+    if isinstance(data, dict):
+        log_fn(f"   JSON top-level keys: {list(data.keys())}")
+    elif isinstance(data, list):
+        log_fn(f"   JSON is list[{len(data)}]")
+
+    # ── Locate the transaction array ──────────────────────────────────────────
+    TX_KEYS = {"transactionType", "type", "action", "player", "playerName",
+               "addPlayerInfo", "dropPlayerInfo", "fantasyTeam"}
+
+    def _find_tx(obj, depth=0):
+        if depth > 6:
+            return None
+        if isinstance(obj, list):
+            if len(obj) > 0 and isinstance(obj[0], dict):
+                first = obj[0]
+                # Confident match: has known transaction field names
+                if TX_KEYS & set(first.keys()):
+                    return obj
+                # Probable match: large list of dicts
+                if len(obj) > 2:
+                    return obj
+            # Not a tx list — recurse into elements to find one
+            candidates = [c for v in obj for c in [_find_tx(v, depth + 1)] if c]
+            if candidates:
+                return max(candidates, key=len)
+            return None
+        if isinstance(obj, dict):
+            # Try well-known key names first
+            for key in ("transactions", "transactionList", "items", "rows",
+                        "history", "claims", "drops", "adds"):
+                if key in obj and isinstance(obj[key], list) and len(obj[key]) > 0:
+                    return obj[key]
+            # Recurse into all values, pick the largest result
+            candidates = [c for v in obj.values() for c in [_find_tx(v, depth + 1)] if c]
+            if candidates:
+                return max(candidates, key=len)
+        return None
+
+    tx_list = _find_tx(data)
+    if not tx_list:
+        log_fn("   ✗  No transaction list located in JSON")
+        log_fn(f"   JSON (first 1000 chars): {json.dumps(data)[:1000]}")
+        return None
+
+    log_fn(f"   Found {len(tx_list)} transaction object(s)")
+    log_fn(f"   Sample keys : {list(tx_list[0].keys())[:20]}")
+    log_fn(f"   Sample value: {json.dumps(tx_list[0])[:400]}")
+
+    # ── Field extraction helpers ──────────────────────────────────────────────
+
+    def _norm_pos(pos):
+        if not pos:
+            return ""
+        if isinstance(pos, list):
+            return ",".join(str(p) for p in pos)
+        return str(pos)
+
+    def _norm_type(raw):
+        if not raw:
+            return ""
+        s = str(raw).upper()
+        if "DROP" in s:
+            return "Drop"
+        if "ADD" in s or "CLAIM" in s or "WAIVER" in s:
+            return "Claim"
+        return str(raw)
+
+    def _norm_date(val):
+        if val is None:
+            return ""
+        if isinstance(val, (int, float)) and val > 1e10:
+            # millisecond epoch
+            try:
+                return dt_mod.datetime.utcfromtimestamp(val / 1000).strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                return str(val)
+        if isinstance(val, (int, float)) and val > 1e6:
+            # second epoch
+            try:
+                return dt_mod.datetime.utcfromtimestamp(val).strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                return str(val)
+        return str(val)
+
+    def _get_player(tx):
+        """Return (name, mlb_team, positions) from a transaction dict."""
+        # Flat fields
+        name = tx.get("playerName") or tx.get("player") or tx.get("name")
+        team = tx.get("mlbTeam") or tx.get("team") or tx.get("mlbTeamId")
+        pos  = tx.get("position") or tx.get("positions") or tx.get("pos")
+        if name:
+            return str(name), str(team or ""), _norm_pos(pos)
+
+        # Nested: addPlayerInfo.player / dropPlayerInfo.player
+        for info_key in ("addPlayerInfo", "dropPlayerInfo", "playerInfo"):
+            info = tx.get(info_key)
+            if not isinstance(info, dict):
+                continue
+            p = info.get("player", info)
+            if isinstance(p, dict):
+                name = p.get("name") or p.get("displayName") or p.get("playerName")
+                team = p.get("mlbTeamId") or p.get("mlbTeam") or p.get("team")
+                pos  = p.get("positions") or p.get("position") or p.get("eligiblePositions")
+                if name:
+                    return str(name), str(team or ""), _norm_pos(pos)
+        return "", "", ""
+
+    def _get_owner(tx):
+        """Return fantasy team name string."""
+        for key in ("fantasyTeamName", "owner", "teamName"):
+            v = tx.get(key)
+            if v and isinstance(v, str):
+                return v
+        for key in ("fantasyTeam", "toTeam", "team"):
+            v = tx.get(key)
+            if isinstance(v, dict):
+                n = v.get("name") or v.get("displayName")
+                if n:
+                    return str(n)
+        return ""
+
+    # ── Build rows ────────────────────────────────────────────────────────────
+    rows = []
+    for tx in tx_list:
+        player, team, pos = _get_player(tx)
+        tx_type = _norm_type(
+            tx.get("transactionType") or tx.get("type") or tx.get("action")
+        )
+        owner   = _get_owner(tx)
+        bid_val = (tx.get("faabBid") if tx.get("faabBid") is not None
+                   else tx.get("bid") if tx.get("bid") is not None
+                   else tx.get("amount") if tx.get("amount") is not None
+                   else tx.get("faab"))
+        bid     = "" if bid_val is None else str(bid_val)
+        date_val = (tx.get("processedDate") or tx.get("processedDateMs")
+                    or tx.get("transactionDate") or tx.get("date")
+                    or tx.get("timestamp"))
+        date_str = _norm_date(date_val)
+        period   = (tx.get("period") or tx.get("scoringPeriod")
+                    or tx.get("scoringPeriodId") or tx.get("periodId") or "")
+        rows.append([player, team, pos, tx_type, owner, bid, date_str,
+                     str(period) if period else ""])
+
+    return rows
+
+
 def scrape_th_via_api(driver: webdriver.Chrome, export: dict,
                       topps_api_info: dict) -> bool:
     """
@@ -510,11 +673,43 @@ def scrape_th_via_api(driver: webdriver.Chrome, export: dict,
         log(f"   ✗  Non-200 response. Body: {resp.text[:300]}")
         return False
 
-    # The response should be CSV (same format as the Topps TH export)
+    content_type = resp.headers.get("Content-Type", "")
     dest = SOURCES_DIR / f"{name}.csv"
-    dest.write_bytes(resp.content)
-    size_kb = len(resp.content) // 1024
-    log(f"   ✓  Saved → {dest.name}  ({size_kb} KB)")
+
+    # ── Detect JSON vs CSV response ───────────────────────────────────────────
+    is_json = "application/json" in content_type or resp.content[:1] in (b"{", b"[")
+    if is_json:
+        log("   Response is JSON — parsing into TH CSV format …")
+        # Log POST body so we can understand what method was called
+        log(f"   POST body (first 300): {(topps_api_info.get('body') or '')[:300]}")
+        try:
+            data = resp.json()
+        except Exception as e:
+            log(f"   ✗  JSON parse error: {e}")
+            debug = SOURCES_DIR / f"{name}_debug.json"
+            debug.write_bytes(resp.content)
+            log(f"   Raw response saved → {debug.name} for inspection")
+            return False
+
+        rows = _parse_fantrax_th_json(data, log)
+        if rows is None:
+            log("   ✗  JSON structure not recognized — saving raw JSON for inspection")
+            debug = SOURCES_DIR / f"{name}_debug.json"
+            debug.write_text(resp.text, encoding="utf-8")
+            log(f"   Raw JSON saved → {debug.name}")
+            return False
+
+        with open(dest, "w", newline="", encoding="utf-8") as f:
+            writer = csv_mod.writer(f)
+            writer.writerow(TH_CSV_HEADERS)
+            writer.writerows(rows)
+        log(f"   ✓  Parsed {len(rows)} rows → {dest.name}")
+    else:
+        # Already CSV (same format as Topps TH export) — save directly
+        dest.write_bytes(resp.content)
+        size_kb = len(resp.content) // 1024
+        log(f"   ✓  Saved CSV → {dest.name}  ({size_kb} KB)")
+
     return True
 
 
