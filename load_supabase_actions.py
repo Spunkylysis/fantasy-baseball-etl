@@ -384,18 +384,24 @@ def main() -> int:
         else:
             clean_rows = all_rows
 
-        # Accumulate salary map from Hitter/Pitcher tables
+        # Accumulate salary map from Hitter/Pitcher tables.
+        # Keyed by (player_name, league) so Topps and Rawlings salaries are
+        # stored independently — a player's salary can differ across leagues.
         league = "Rawlings" if "Rawlings" in table_name else "Topps"
         pid_idx    = sb_cols.index("ID")
         player_idx = sb_cols.index("Player")
         salary_idx = sb_cols.index("Salary")
+        status_idx = sb_cols.index("Status")
         for row in clean_rows:
             if len(row) > salary_idx:
-                pname = row[player_idx]
-                sal   = row[salary_idx]
-                pid   = row[pid_idx]
-                if pname and sal is not None and pname not in salary_map:
-                    salary_map[pname] = (sal, pid, league)
+                pname  = row[player_idx]
+                sal    = row[salary_idx]
+                pid    = row[pid_idx]
+                status = row[status_idx] if len(row) > status_idx else None
+                if pname and sal is not None:
+                    # Always overwrite so the most-recently-loaded file wins
+                    # (both leagues are loaded once per ETL run)
+                    salary_map[(pname, league)] = (sal, pid, status)
 
         if DRY_RUN:
             log(f"  DRY RUN — would TRUNCATE and INSERT {len(clean_rows)} rows")
@@ -449,13 +455,24 @@ def main() -> int:
             if date_cdt is None:
                 date_cdt = _period_to_date(period)
 
-            # Salary / player ID lookup
-            info = salary_map.get(player) if player else None
-            salary, pid, league = info if info else (None, None, None)
+            # Derive league from owner name: "(T)" suffix → Topps, else Rawlings.
+            # This ensures we look up the correct league salary for each drop.
+            owner_str   = str(owner).strip() if owner else ""
+            owner_league = "Topps" if owner_str.endswith("(T)") else "Rawlings"
 
-            # Derived fields
-            cap_hit_pct = -0.5
-            cap_hit     = int(round(salary * cap_hit_pct)) if salary else None
+            # Salary / player ID / roster-status lookup (league-aware)
+            info = salary_map.get((player, owner_league)) if player else None
+            salary, pid, roster_status = info if info else (None, None, None)
+            league = owner_league
+
+            # Cap hit: Minor-league-rostered players carry 0% penalty (they are
+            # development slots, not active roster commitments).  All others: -50%.
+            if roster_status == "Minor":
+                cap_hit_pct = 0.0
+                cap_hit     = 0
+            else:
+                cap_hit_pct = -0.5
+                cap_hit     = int(round(salary * cap_hit_pct)) if salary else None
             key         = f"{pid}{league}" if pid and league else None
             date_number = _excel_serial(date_cdt)
             table_key   = f"{key}{date_number}" if key and date_number else None
