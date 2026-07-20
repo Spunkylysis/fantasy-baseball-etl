@@ -751,7 +751,18 @@ def export_page_capture_api(driver: webdriver.Chrome, export: dict,
         if "cdn-cgi" in url:
             continue
 
-        if DIV_TOPPS not in url and DIV_TOPPS not in body:
+        # Strip the `refUrl` field before checking for the division ID.
+        # Every fxpa/req call includes the current page URL in `refUrl`, so
+        # even a notificationCenter call will have DIV_TOPPS there.  We only
+        # want calls where DIV_TOPPS appears in the actual request data.
+        try:
+            body_data = json.dumps(
+                {k: v for k, v in json.loads(body).items() if k != "refUrl"}
+            )
+        except Exception:
+            body_data = body
+
+        if DIV_TOPPS not in url and DIV_TOPPS not in body_data:
             continue
 
         # Score the match: prefer the canonical Fantrax data API endpoint
