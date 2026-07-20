@@ -649,21 +649,42 @@ def _parse_fantrax_th_json(data, log_fn) -> tuple | None:
         tx_type = _norm_type(
             tx.get("transactionType") or tx.get("type") or tx.get("action")
         )
-        owner   = _get_owner(tx)
-        # feesUsed is False (bool) for drops, numeric for claims — skip booleans
+
+        # Build cell lookup by 'key' field — used for owner, bid, date, period
+        # Fantrax API cells: [{key:"team",content:"Ant Man (R)"},
+        #                     {key:"bid",content:""},
+        #                     {key:"date",content:"Mon Jul 20, 2026, 5:23PM"},
+        #                     {key:"week",content:"118"}]
+        cell_map: dict = {}
+        for c in tx.get("cells", []):
+            if isinstance(c, dict) and "key" in c:
+                cell_map[c["key"]] = c.get("content", "")
+
+        # Owner: cells["team"] is the fantasy team name (e.g. "Ant Man (R)")
+        owner = (cell_map.get("team") or _get_owner(tx))
+
+        # Bid: cells["bid"] first; fallback to feesUsed (skip booleans)
+        _bid_cell = cell_map.get("bid", "")
         _fees = tx.get("feesUsed")
-        bid_val = (_fees if (_fees is not None and not isinstance(_fees, bool))
+        _fees_val = _fees if (_fees is not None and not isinstance(_fees, bool)) else None
+        bid_val = (_bid_cell if _bid_cell
+                   else _fees_val if _fees_val is not None
                    else tx.get("faabBid") if tx.get("faabBid") is not None
                    else tx.get("bid") if tx.get("bid") is not None
                    else tx.get("amount") if tx.get("amount") is not None
                    else tx.get("faab"))
-        bid     = "" if bid_val is None else str(bid_val)
-        date_val = (tx.get("executed") or tx.get("processedDate")
+        bid = "" if not bid_val else str(bid_val)
+
+        # Date: cells["date"] first; 'executed' is a boolean in this API — skip it
+        date_val = (cell_map.get("date") or tx.get("processedDate")
                     or tx.get("processedDateMs") or tx.get("transactionDate")
                     or tx.get("date") or tx.get("timestamp"))
         date_str = _norm_date(date_val)
-        period   = (tx.get("period") or tx.get("scoringPeriod")
-                    or tx.get("scoringPeriodId") or tx.get("periodId") or "")
+
+        # Period: cells["week"] or cells["period"]
+        period = (cell_map.get("week") or cell_map.get("period")
+                  or tx.get("period") or tx.get("scoringPeriod")
+                  or tx.get("scoringPeriodId") or tx.get("periodId") or "")
         rows.append([player, team, pos, tx_type, owner, bid, date_str,
                      str(period) if period else ""])
 
