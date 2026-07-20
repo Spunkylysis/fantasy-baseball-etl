@@ -506,8 +506,15 @@ def _parse_fantrax_th_json(data, log_fn) -> tuple | None:
                     tx_list = val
                     log_fn(f"   Row list key='{key}', {len(tx_list)} rows on this page")
                     if tx_list:
-                        log_fn(f"   Row[0] keys : {list(tx_list[0].keys())[:20]}")
-                        log_fn(f"   Row[0] value: {json.dumps(tx_list[0])[:500]}")
+                        r0 = tx_list[0]
+                        log_fn(f"   Row[0] keys : {list(r0.keys())[:20]}")
+                        log_fn(f"   Row[0] full : {json.dumps(r0)[:2000]}")
+                        # Log specific diagnostic fields
+                        log_fn(f"   Row[0] transactionType = {r0.get('transactionType')!r}")
+                        log_fn(f"   Row[0] feesUsed        = {r0.get('feesUsed')!r}")
+                        log_fn(f"   Row[0] executed        = {r0.get('executed')!r}")
+                        cells = r0.get("cells", [])
+                        log_fn(f"   Row[0] cells[:3]       = {json.dumps(cells[:3])[:400]}")
                     break
                 elif isinstance(val, dict):
                     # table may be {"rows": [...], "headers": [...]}
@@ -572,7 +579,17 @@ def _parse_fantrax_th_json(data, log_fn) -> tuple | None:
 
     def _get_player(tx):
         """Return (name, mlb_team, positions) from a transaction dict."""
-        # Flat fields
+        # getTransactionDetailsHistory: player info in 'scorer' sub-object
+        scorer = tx.get("scorer")
+        if isinstance(scorer, dict):
+            name = scorer.get("name") or scorer.get("playerName")
+            team = (scorer.get("teamShortName") or scorer.get("mlbTeam")
+                    or scorer.get("teamId"))
+            pos  = scorer.get("posShortNames") or scorer.get("positions")
+            if name:
+                return str(name), str(team or ""), _norm_pos(pos)
+
+        # Flat fields (other API formats)
         name = tx.get("playerName") or tx.get("player") or tx.get("name")
         team = tx.get("mlbTeam") or tx.get("team") or tx.get("mlbTeamId")
         pos  = tx.get("position") or tx.get("positions") or tx.get("pos")
@@ -595,16 +612,28 @@ def _parse_fantrax_th_json(data, log_fn) -> tuple | None:
 
     def _get_owner(tx):
         """Return fantasy team name string."""
+        # Flat string fields
         for key in ("fantasyTeamName", "owner", "teamName"):
             v = tx.get(key)
             if v and isinstance(v, str):
                 return v
+        # Nested dict fields
         for key in ("fantasyTeam", "toTeam", "team"):
             v = tx.get(key)
             if isinstance(v, dict):
                 n = v.get("name") or v.get("displayName")
                 if n:
                     return str(n)
+        # cells array: look for a cell whose content looks like a fantasy team name
+        # (contains a space or parenthesis — avoids picking up stat strings)
+        for cell in tx.get("cells", []):
+            if not isinstance(cell, dict):
+                continue
+            col = str(cell.get("columnId", "") or cell.get("type", "")).lower()
+            if "team" in col or "owner" in col or "fantasy" in col:
+                v = cell.get("content") or cell.get("value")
+                if v and isinstance(v, str):
+                    return v
         return ""
 
     # ── Build rows ────────────────────────────────────────────────────────────
@@ -615,14 +644,15 @@ def _parse_fantrax_th_json(data, log_fn) -> tuple | None:
             tx.get("transactionType") or tx.get("type") or tx.get("action")
         )
         owner   = _get_owner(tx)
-        bid_val = (tx.get("faabBid") if tx.get("faabBid") is not None
+        bid_val = (tx.get("feesUsed") if tx.get("feesUsed") is not None
+                   else tx.get("faabBid") if tx.get("faabBid") is not None
                    else tx.get("bid") if tx.get("bid") is not None
                    else tx.get("amount") if tx.get("amount") is not None
                    else tx.get("faab"))
         bid     = "" if bid_val is None else str(bid_val)
-        date_val = (tx.get("processedDate") or tx.get("processedDateMs")
-                    or tx.get("transactionDate") or tx.get("date")
-                    or tx.get("timestamp"))
+        date_val = (tx.get("executed") or tx.get("processedDate")
+                    or tx.get("processedDateMs") or tx.get("transactionDate")
+                    or tx.get("date") or tx.get("timestamp"))
         date_str = _norm_date(date_val)
         period   = (tx.get("period") or tx.get("scoringPeriod")
                     or tx.get("scoringPeriodId") or tx.get("periodId") or "")
