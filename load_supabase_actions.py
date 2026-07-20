@@ -427,11 +427,10 @@ def main() -> int:
     # ── Transaction History ────────────────────────────────────────────────────
     log(f"\n── Fantrax_Transaction_History {'─'*39}")
 
-    th_files = [BATCH_DIR / "Fantrax_Transaction_History_000.sql"]
-    th_files = [f for f in th_files if f.exists()]
+    th_files = sorted(BATCH_DIR.glob("Fantrax_Transaction_History_*.sql"))
 
     if not th_files:
-        log("  ✗  Fantrax_Transaction_History_000.sql not found — skipping TH")
+        log("  ✗  No Fantrax_Transaction_History_*.sql files found — skipping TH")
     else:
         raw_th: list[list] = []
         for fpath in th_files:
