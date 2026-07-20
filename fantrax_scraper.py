@@ -97,8 +97,8 @@ EXPORTS = [
     },
     {
         "name":      "Fantrax_Transaction_History_Rawlings",
-        "url":       f"{BASE}/transactions/history;team=DIV_{DIV_RAWLINGS}",
-        "wait_for":  "table, .ag-root, [class*='transactions'], [class*='history']",
+        "url":       f"{BASE}/commissioner/claim-drop;divId={DIV_RAWLINGS}",
+        "wait_for":  "table, .ag-root, [class*='transactions'], [class*='history'], [class*='claim']",
     },
     {
         "name":      "Fantrax_HOD_Drafts_Topps",
