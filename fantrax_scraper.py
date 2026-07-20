@@ -13,7 +13,9 @@ Requirements:
 """
 
 import csv as csv_mod
+import json
 import os
+import re
 import sys
 import time
 import shutil
@@ -92,17 +94,20 @@ EXPORTS = [
         "wait_for":  "table, .ag-root, .player-table, [class*='playerTable'], [class*='fantasy-table']",
     },
     {
-        "name":      "Fantrax_Transaction_History_Topps",
-        "url":       f"{BASE}/transactions/history;team=DIV_{DIV_TOPPS}",
-        "wait_for":  "table, .ag-root, [class*='transactions'], [class*='history']",
+        # Topps TH: export normally AND capture the XHR API call so we can
+        # replay it for Rawlings (which has no accessible TH page for this account).
+        "name":        "Fantrax_Transaction_History_Topps",
+        "url":         f"{BASE}/transactions/history;team=DIV_{DIV_TOPPS}",
+        "wait_for":    "table, .ag-root, [class*='transactions'], [class*='history']",
+        "scrape_type": "capture_api",
     },
     {
-        # Rawlings TH: regular TH page is division-scoped to the scraper's Topps
-        # account and returns nothing for Rawlings. The commissioner/claim-drop page
-        # has Rawlings data but no export button — scrape the ag-grid rows directly.
+        # Rawlings TH: replays the captured Fantrax API call with DIV_RAWLINGS.
+        # No Fantrax page accessible to the scraper account exposes Rawlings TH
+        # (the regular TH page is Topps-scoped; the commissioner/claim-drop page
+        # is a roster management tool, not a history view).
         "name":        "Fantrax_Transaction_History_Rawlings",
-        "url":         f"{BASE}/commissioner/claim-drop;divId={DIV_RAWLINGS}",
-        "scrape_type": "commissioner_html",
+        "scrape_type": "api_replay",
     },
     {
         "name":      "Fantrax_HOD_Drafts_Topps",
@@ -185,6 +190,10 @@ def make_driver() -> webdriver.Chrome:
         # Local mode — keep browser open so failures are inspectable
         opts.add_experimental_option("detach", True)
         opts.add_argument("--start-maximized")
+
+    # Enable performance logging so we can capture XHR/fetch requests made by
+    # Angular pages.  Used by scrape_th_via_api() to find the Fantrax API URL.
+    opts.set_capability("goog:loggingPrefs", {"performance": "ALL"})
 
     service = Service(ChromeDriverManager().install())
     return webdriver.Chrome(service=service, options=opts)
@@ -416,158 +425,139 @@ def export_page(driver: webdriver.Chrome, export: dict) -> bool:
     return True
 
 
-# ── Commissioner claim-drop HTML extractor ─────────────────────────────────────
-# The commissioner/claim-drop page has no export button.  We extract ag-grid rows
-# directly via JavaScript and write a CSV matching the standard TH export format.
+# ── Rawlings TH via API intercept ──────────────────────────────────────────────
+# The regular TH page (transactions/history) is division-scoped to the scraper
+# account's Topps membership — team=DIV_{DIV_RAWLINGS} returns nothing.
+# The commissioner/claim-drop page is a roster management tool, NOT transaction
+# history.  No Fantrax page accessible to this account has a Rawlings TH export.
+#
+# Solution: intercept the XHR/fetch Fantrax makes when loading the Topps TH page,
+# extract the API URL + headers, then replay it with DIV_RAWLINGS.  The Angular
+# app calls the same backend endpoint for both divisions — only the divisionId
+# parameter differs.  We use requests + Selenium session cookies so auth is
+# handled automatically.
 
-# Maps commissioner page ag-grid header text → standard TH CSV column name.
-# Logged on every run so the mapping can be verified and corrected if Fantrax
-# changes column names.
-COMMISSIONER_COL_MAP = {
-    "Player":        "Player",
-    "MLB Team":      "Team",
-    "Team":          "Team",
-    "Pos":           "Position",
-    "Position":      "Position",
-    "Type":          "Type",
-    "Fantasy Team":  "Owner",
-    "Owner":         "Owner",
-    "Bid":           "Bid",
-    "FAAB Bid":      "Bid",
-    "FAAB":          "Bid",
-    "Time (CDT)":    "Time (CDT)",
-    "Date":          "Time (CDT)",
-    "Time":          "Time (CDT)",
-    "Period":        "Period",
-    "Wk":            "Period",
-    "Week":          "Period",
-}
-
-# Output column order — must match the Topps TH export so csv_to_batches.py
-# can merge both files into a single Fantrax_Transaction_History table.
-TH_CSV_HEADERS = ["Player", "Team", "Position", "Type", "Owner", "Bid",
-                   "Time (CDT)", "Period"]
+try:
+    import requests as _requests
+    _REQUESTS_OK = True
+except ImportError:
+    _REQUESTS_OK = False
 
 
-def scrape_commissioner_claim_drop(driver: webdriver.Chrome, export: dict) -> bool:
+def _drain_perf_log(driver: webdriver.Chrome) -> list[dict]:
+    """Return all accumulated performance log entries and clear the buffer."""
+    try:
+        return [json.loads(e["message"])["message"] for e in driver.get_log("performance")]
+    except Exception:
+        return []
+
+
+def scrape_th_via_api(driver: webdriver.Chrome, export: dict,
+                      topps_api_info: dict) -> bool:
     """
-    Scrape Fantrax commissioner/claim-drop by extracting ag-grid rows via
-    JavaScript.  Saves a CSV matching the standard TH export column layout.
+    Replay the Fantrax TH API call captured while loading the Topps TH page,
+    substituting DIV_RAWLINGS for DIV_TOPPS in the request URL/body.
+
+    topps_api_info is populated by export_page() when it processes the Topps TH
+    entry (scrape_type='capture_api').  It contains:
+        url      – full API endpoint URL
+        method   – 'GET' or 'POST'
+        headers  – dict of request headers (including auth/session tokens)
+        body     – raw POST body string (or None for GET)
+        cookies  – dict of session cookies from Selenium
     """
     name = export["name"]
-    url  = export["url"]
-
     log(f"\n── {name} {'─' * max(1, 54 - len(name))}")
-    log(f"   → {url}  [commissioner ag-grid extraction]")
 
-    driver.get(url)
-
-    # Wait for at least one ag-grid row to appear
-    log("   Waiting for ag-grid rows …")
-    try:
-        WebDriverWait(driver, PAGE_LOAD_WAIT).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, ".ag-row"))
-        )
-        time.sleep(5)   # allow Angular to finish rendering all rows
-    except TimeoutException:
-        _save_debug(driver, name)
-        log(f"   ✗  No ag-grid rows found after {PAGE_LOAD_WAIT}s. "
-            f"Debug saved → debug_{name}.html")
+    if not topps_api_info:
+        log("   ✗  No Topps API info captured — cannot replay for Rawlings.")
+        log("      Check that Fantrax_Transaction_History_Topps ran first "
+            "with scrape_type='capture_api'.")
         return False
 
-    # Scroll to bottom then back to top to materialise virtualised rows
-    try:
-        driver.execute_script(
-            "const vp = document.querySelector('.ag-body-viewport');"
-            "if (vp) vp.scrollTop = vp.scrollHeight;"
-        )
-        time.sleep(2)
-        driver.execute_script(
-            "const vp = document.querySelector('.ag-body-viewport');"
-            "if (vp) vp.scrollTop = 0;"
-        )
-        time.sleep(1)
-    except Exception:
-        pass
-
-    # Extract column headers from the rendered ag-grid header row
-    raw_headers: list = driver.execute_script("""
-        return Array.from(
-            document.querySelectorAll('.ag-header-cell .ag-header-cell-text')
-        ).map(el => el.textContent.trim()).filter(h => h.length > 0);
-    """) or []
-    log(f"   Headers found on page: {raw_headers}")
-
-    # Try ag-grid internal API first — returns ALL rows including virtualised ones
-    raw_rows = driver.execute_script("""
-        const root = document.querySelector('.ag-root-wrapper');
-        if (!root) return null;
-        for (const key of Object.keys(root)) {
-            try {
-                const comp = root[key];
-                const api  = comp && (comp.gridOptions?.api || comp.api || comp.gridApi);
-                if (api && typeof api.forEachNode === 'function') {
-                    const rows = [];
-                    api.forEachNode(node => { if (node.data) rows.push(Object.values(node.data)); });
-                    return rows;
-                }
-            } catch (e) {}
-        }
-        return null;
-    """)
-
-    if not raw_rows:
-        # Fallback: extract from visible DOM cells, sorted by left-offset
-        log("   ag-grid API inaccessible — falling back to DOM cell extraction")
-        raw_rows = driver.execute_script("""
-            const rows = [];
-            document.querySelectorAll('.ag-row').forEach(rowEl => {
-                const cells = Array.from(rowEl.querySelectorAll('.ag-cell'));
-                cells.sort((a, b) =>
-                    parseInt(a.style.left || 0) - parseInt(b.style.left || 0)
-                );
-                rows.push(cells.map(c => c.textContent.trim()));
-            });
-            return rows;
-        """) or []
-
-    if not raw_rows:
-        _save_debug(driver, name)
-        log(f"   ✗  Extracted 0 rows. Debug saved → debug_{name}.html")
+    if not _REQUESTS_OK:
+        log("   ✗  'requests' library not installed. Run: pip install requests")
         return False
 
-    log(f"   Extracted {len(raw_rows)} rows")
+    # Substitute Rawlings division ID everywhere the Topps ID appears
+    api_url  = topps_api_info["url"].replace(DIV_TOPPS, DIV_RAWLINGS)
+    method   = topps_api_info["method"]
+    headers  = topps_api_info["headers"]
+    body     = topps_api_info.get("body") or ""
+    if body:
+        body = body.replace(DIV_TOPPS, DIV_RAWLINGS)
+    cookies  = topps_api_info["cookies"]
 
-    # Build header → index map using COMMISSIONER_COL_MAP
-    col_index: dict[str, int] = {}
-    for i, h in enumerate(raw_headers):
-        mapped = COMMISSIONER_COL_MAP.get(h)
-        if mapped and mapped not in col_index:
-            col_index[mapped] = i
-    log(f"   Column mapping applied: {col_index}")
-    missing = [c for c in TH_CSV_HEADERS if c not in col_index]
-    if missing:
-        log(f"   ⚠  Columns not found on page (will be blank): {missing}")
+    log(f"   Replaying {method} {api_url[:120]}")
 
-    # Build output rows in standard TH column order
-    out_rows = []
-    for raw in raw_rows:
-        out_row = [
-            (raw[col_index[col]] if col in col_index and col_index[col] < len(raw) else "")
-            for col in TH_CSV_HEADERS
-        ]
-        out_rows.append(out_row)
+    sess = _requests.Session()
+    for c in cookies:
+        sess.cookies.set(c["name"], c["value"], domain=c.get("domain", ""))
 
-    # Write CSV
+    try:
+        if method == "POST":
+            resp = sess.post(api_url, data=body, headers=headers, timeout=30)
+        else:
+            resp = sess.get(api_url, headers=headers, timeout=30)
+    except Exception as e:
+        log(f"   ✗  API request failed: {e}")
+        return False
+
+    log(f"   Response: HTTP {resp.status_code}, {len(resp.content):,} bytes, "
+        f"Content-Type: {resp.headers.get('Content-Type','?')[:60]}")
+
+    if resp.status_code != 200:
+        log(f"   ✗  Non-200 response. Body: {resp.text[:300]}")
+        return False
+
+    # The response should be CSV (same format as the Topps TH export)
     dest = SOURCES_DIR / f"{name}.csv"
-    with open(dest, "w", newline="", encoding="utf-8") as f:
-        writer = csv_mod.writer(f)
-        writer.writerow(TH_CSV_HEADERS)
-        writer.writerows(out_rows)
-
-    size_kb = dest.stat().st_size // 1024
-    log(f"   ✓  Saved → {dest.name}  ({size_kb} KB, {len(out_rows)} rows)")
+    dest.write_bytes(resp.content)
+    size_kb = len(resp.content) // 1024
+    log(f"   ✓  Saved → {dest.name}  ({size_kb} KB)")
     return True
+
+
+def export_page_capture_api(driver: webdriver.Chrome, export: dict,
+                             topps_api_info: dict) -> bool:
+    """
+    Wrapper around export_page() that additionally captures the XHR/fetch call
+    Fantrax makes to populate the TH table.  Populates topps_api_info in-place.
+    """
+    # Drain any stale perf log entries before navigating
+    _drain_perf_log(driver)
+
+    ok = export_page(driver, export)
+
+    # Scan performance log for the Fantrax data API call
+    entries = _drain_perf_log(driver)
+    for entry in entries:
+        method = entry.get("method", "")
+        params = entry.get("params", {})
+
+        if method == "Network.requestWillBeSent":
+            req = params.get("request", {})
+            url = req.get("url", "")
+            # Look for a Fantrax XHR that contains the Topps division ID in its
+            # URL or POST body — this is the data API call we want to replay.
+            body = req.get("postData", "") or ""
+            if DIV_TOPPS in url or DIV_TOPPS in body:
+                rtype = params.get("type", "")
+                if rtype in ("XHR", "Fetch", "fetch", "xhr"):
+                    log(f"   [API capture] {req.get('method','GET')} {url[:100]}")
+                    topps_api_info["url"]    = url
+                    topps_api_info["method"] = req.get("method", "GET")
+                    topps_api_info["headers"] = req.get("headers", {})
+                    topps_api_info["body"]   = body
+                    # Grab cookies from Selenium session
+                    topps_api_info["cookies"] = driver.get_cookies()
+                    break   # first match is the data call
+
+    if not topps_api_info:
+        log("   ⚠  No Fantrax API call captured for Topps TH — "
+            "Rawlings replay will be skipped.")
+
+    return ok
 
 
 # ── Debug helper ───────────────────────────────────────────────────────────────
@@ -597,9 +587,14 @@ def main() -> int:
     try:
         login(driver)
 
+        topps_api_info: dict = {}   # populated by capture_api, consumed by api_replay
+
         for export in EXPORTS:
-            if export.get("scrape_type") == "commissioner_html":
-                ok = scrape_commissioner_claim_drop(driver, export)
+            stype = export.get("scrape_type")
+            if stype == "capture_api":
+                ok = export_page_capture_api(driver, export, topps_api_info)
+            elif stype == "api_replay":
+                ok = scrape_th_via_api(driver, export, topps_api_info)
             else:
                 ok = export_page(driver, export)
             results.append((export["name"], ok))
