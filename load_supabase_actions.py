@@ -484,13 +484,14 @@ def main() -> int:
             salary, pid, roster_status = info if info else (None, None, None)
             league = owner_league
 
-            # Cap hit: -50% for any player who was ORIGINALLY DRAFTED (appears in
-            # HOD_Drafts for this league), regardless of current contract type.
-            # Being drafted creates a permanent cap hit obligation — a contract
-            # that changed from "1st" to "Minor" after the draft does not exempt
-            # the dropping team.  FA pickups (never in HOD_Drafts) are always exempt.
+            # Cap hit: -50% only if the player was ORIGINALLY DRAFTED (in HOD_Drafts)
+            # AND currently holds a "1st" contract.
+            # "Minor" and "FA" contract drops are always exempt — only active
+            # first-round obligation contracts trigger the penalty.
+            # FA pickups (never in HOD_Drafts) are always exempt regardless of
+            # their current Contract value.
             in_draft = bool(player) and (player, league) in draft_set
-            if in_draft:
+            if in_draft and roster_status == "1st":
                 cap_hit_pct = -0.5
                 cap_hit     = int(round(salary * cap_hit_pct)) if salary else None
             else:
