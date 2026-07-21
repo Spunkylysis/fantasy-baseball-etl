@@ -458,9 +458,15 @@ def _drain_perf_log(driver: webdriver.Chrome) -> list[dict]:
         return []
 
 
-def _parse_fantrax_th_json(data, log_fn) -> tuple | None:
+def _parse_fantrax_th_json(data, log_fn, carry_state: dict | None = None) -> tuple | None:
     """
     Convert one page of Fantrax /fxpa/req JSON into TH CSV rows.
+
+    carry_state – mutable dict shared across page calls for group-transaction
+                  cell propagation.  Keys: 'last_txset_id', 'last_group_cells'.
+                  Pass the same dict to every page call so that a transaction
+                  group spanning a page boundary still inherits the owner/date
+                  cells from the first row (which appeared on the previous page).
 
     Returns (rows, pagination) where:
         rows       – list of 8-element lists matching TH_CSV_HEADERS
@@ -643,6 +649,16 @@ def _parse_fantrax_th_json(data, log_fn) -> tuple | None:
         return ""
 
     # ── Build rows ────────────────────────────────────────────────────────────
+    # Group-transaction state: Fantrax only populates cells[] on the FIRST row
+    # in a txSetId group (rowspan pattern in the UI). Subsequent rows in the same
+    # group have empty cells, so their owner/date/period would be NULL.
+    # We propagate the first row's cells to all subsequent rows in the group.
+    # carry_state persists this across page boundaries.
+    if carry_state is None:
+        carry_state = {}
+    last_txset_id: str = carry_state.get("last_txset_id", "")
+    last_group_cells: dict = carry_state.get("last_group_cells", {})
+
     rows = []
     for tx in tx_list:
         player, team, pos = _get_player(tx)
@@ -659,6 +675,31 @@ def _parse_fantrax_th_json(data, log_fn) -> tuple | None:
         for c in tx.get("cells", []):
             if isinstance(c, dict) and "key" in c:
                 cell_map[c["key"]] = c.get("content", "")
+
+        # Group-transaction propagation.
+        # Strategy 1 (preferred): txSetId match — explicit group membership.
+        # Strategy 2 (fallback): if cells["team"] is absent/empty on this row
+        #   but last_group_cells has a team, inherit it.  This handles the common
+        #   Fantrax rowspan pattern where txSetId is omitted and only the first
+        #   row in a batch drop carries the owner cell.
+        txset_id = str(tx.get("txSetId", ""))
+        has_team = bool(cell_map.get("team"))
+        if txset_id and txset_id == last_txset_id:
+            # Explicit same-group match: inherit missing cells
+            for k, v in last_group_cells.items():
+                if not cell_map.get(k):
+                    cell_map[k] = v
+        elif not has_team and last_group_cells.get("team"):
+            # No team on this row but we have one from the previous row/group:
+            # inherit owner (and other empty cells) — rowspan fallback
+            for k, v in last_group_cells.items():
+                if not cell_map.get(k):
+                    cell_map[k] = v
+        else:
+            # New group or row with its own team: update the reference
+            last_txset_id = txset_id
+            if cell_map:  # only update if this row actually has cells
+                last_group_cells = {k: v for k, v in cell_map.items() if v}
 
         # Owner: cells["team"] is the fantasy team name (e.g. "Ant Man (R)")
         owner = (cell_map.get("team") or _get_owner(tx))
@@ -687,6 +728,10 @@ def _parse_fantrax_th_json(data, log_fn) -> tuple | None:
                   or tx.get("scoringPeriodId") or tx.get("periodId") or "")
         rows.append([player, team, pos, tx_type, owner, bid, date_str,
                      str(period) if period else ""])
+
+    # Persist group-tx state for the next page call
+    carry_state["last_txset_id"]    = last_txset_id
+    carry_state["last_group_cells"] = last_group_cells
 
     return rows, pagination
 
@@ -767,7 +812,9 @@ def scrape_th_via_api(driver: webdriver.Chrome, export: dict,
             log(f"   Raw response saved → {debug.name} for inspection")
             return False
 
-        result = _parse_fantrax_th_json(data, log)
+        # carry_state persists group-transaction cells across page boundaries
+        carry_state: dict = {}
+        result = _parse_fantrax_th_json(data, log, carry_state)
         if result is None:
             log("   ✗  JSON structure not recognized — saving raw JSON for inspection")
             debug = SOURCES_DIR / f"{name}_debug.json"
@@ -805,8 +852,9 @@ def scrape_th_via_api(driver: webdriver.Chrome, export: dict,
                     log(f"   ⚠  Page {page_num} HTTP {page_resp.status_code} — stopping")
                     break
 
+                # Pass carry_state so group-tx cells propagate across page boundary
                 page_result = _parse_fantrax_th_json(
-                    page_resp.json(), lambda m: None)   # silent
+                    page_resp.json(), lambda m: None, carry_state)
                 if page_result is None:
                     log(f"   ⚠  Page {page_num} parse failed — stopping")
                     break

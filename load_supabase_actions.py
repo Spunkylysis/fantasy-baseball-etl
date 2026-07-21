@@ -484,14 +484,13 @@ def main() -> int:
             salary, pid, roster_status = info if info else (None, None, None)
             league = owner_league
 
-            # Cap hit: -50% only if the player was ORIGINALLY DRAFTED (appears in
-            # HOD_Drafts for this league) AND has a "1st" contract.
-            # FA pickups (not in draft_set) carry no cap hit obligation regardless
-            # of their current Contract value — their contract may have changed
-            # after being dropped and re-signed by another team.
-            # "Minor" and "FA" contract players are also always exempt.
+            # Cap hit: -50% for any player who was ORIGINALLY DRAFTED (appears in
+            # HOD_Drafts for this league), regardless of current contract type.
+            # Being drafted creates a permanent cap hit obligation — a contract
+            # that changed from "1st" to "Minor" after the draft does not exempt
+            # the dropping team.  FA pickups (never in HOD_Drafts) are always exempt.
             in_draft = bool(player) and (player, league) in draft_set
-            if in_draft and roster_status == "1st":
+            if in_draft:
                 cap_hit_pct = -0.5
                 cap_hit     = int(round(salary * cap_hit_pct)) if salary else None
             else:
@@ -568,10 +567,10 @@ def main() -> int:
     # Exact expected counts for tables that are stable mid-season.
     EXPECTED = {
         "Fantrax_HOD_Drafts":                1540,
-        "Fantrax_Players_Hitters_Rawlings":  3295,
-        "Fantrax_Players_Hitters_Topps":     3295,
-        "Fantrax_Players_Pitchers_Rawlings": 3684,
-        "Fantrax_Players_Pitchers_Topps":    3684,
+        "Fantrax_Players_Hitters_Rawlings":  3302,
+        "Fantrax_Players_Hitters_Topps":     3302,
+        "Fantrax_Players_Pitchers_Rawlings": 3692,
+        "Fantrax_Players_Pitchers_Topps":    3692,
         "Fantrax_Standings":                 28,
         "Fantrax_Standings_Hit":             28,
         "Fantrax_Standings_Pit":             28,
