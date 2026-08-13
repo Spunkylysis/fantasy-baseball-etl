@@ -1,0 +1,75 @@
+# .github/workflows/savant_etl.yml
+#
+# Runs the Baseball Savant ETL daily during the MLB season (April–October).
+# Also available as a manual trigger any time via the GitHub Actions UI.
+#
+# Required secret:
+#   SUPABASE_ANON_KEY  — Supabase anon key (Settings → API in Supabase dashboard)
+#                        Add at: repo → Settings → Secrets and variables → Actions → New repository secret
+#
+# To run manually:
+#   GitHub → Actions tab → "Savant ETL" → Run workflow
+
+name: Savant ETL
+
+on:
+  schedule:
+    # 11:00 UTC = 7:00 AM ET (EST) / 7:00 AM ET (EDT offset by 1hr — close enough)
+    # Runs daily April through October (MLB season).
+    # GitHub cron does not support month ranges natively, so the Python
+    # script simply exits cleanly if Baseball Savant has no data yet.
+    - cron: '0 11 * * *'
+
+  # Manual trigger — use this to re-run immediately outside schedule
+  workflow_dispatch:
+    inputs:
+      year:
+        description: 'Season year (default: current year)'
+        required: false
+        default: ''
+
+jobs:
+  etl:
+    name: Extract → Upload
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      # ── 1. Checkout ────────────────────────────────────────────────────────
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      # ── 2. Python setup ────────────────────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      # ── 3. Install dependencies ────────────────────────────────────────────
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install pybaseball pandas requests
+
+      # ── 4. Extract from Baseball Savant ───────────────────────────────────
+      - name: Extract Savant data
+        env:
+          SAVANT_YEAR: ${{ github.event.inputs.year }}   # empty string → script uses current year
+        run: python savant_extract.py
+
+      # ── 5. Upload to Supabase ──────────────────────────────────────────────
+      - name: Upload to Supabase
+        env:
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          SAVANT_YEAR:       ${{ github.event.inputs.year }}
+        run: python load_savant_to_supabase.py
+
+      # ── 6. Upload CSV as artifact (kept 7 days for debugging) ──────────────
+      - name: Upload CSV artifact
+        if: always()   # upload even if load step fails, so you can inspect the CSV
+        uses: actions/upload-artifact@v4
+        with:
+          name: savant-metrics-${{ github.run_number }}
+          path: savant_metrics_*.csv
+          retention-days: 7
